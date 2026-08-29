@@ -1,0 +1,35 @@
+name: Android plugin
+
+on:
+  push:
+    branches: [plugin-core, "plugin/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+      - name: Build plugin APK
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+      - name: Verify plugin APK
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump xmltree "$APK" AndroidManifest.xml | grep -q dev.enginehost.plugin.RUN
+          unzip -p "$APK" res/raw/enginehost_capabilities.json | grep -q catsystem2-cst-experimental
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enginehost-catsystem2-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
