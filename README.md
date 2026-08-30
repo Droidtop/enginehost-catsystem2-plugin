@@ -7,8 +7,10 @@ currently skipped, so graphics, audio, branching, archive access, and FES UI
 scripts remain future plugin work.
 
 The format implementation follows the publicly documented CatScene structure
-and line types from the TriggersTools.CatSystem2 research project. No code from
-the proprietary CatSystem2 runtime is included. The plugin currently requires
+and line types from the MIT-licensed
+[TriggersTools.CatSystem2](https://github.com/trigger-segfault/TriggersTools.CatSystem2)
+research project. No code from the proprietary CatSystem2 runtime is included.
+The Enginehost implementation is MIT-licensed and currently requires
 already-extracted `.cst` files and never extracts or copies game content.
 
 Capability `cst` / `2.0` is experimental and intentionally narrow. Android
