@@ -42,6 +42,7 @@ jobs:
           python3 enginehost-tooling/scripts/build-engine-bundle.py \
             --metadata enginehost/bundle-metadata.json --payload build/payload \
             --private-key build/signing-key.pem \
+            --repository-key-document enginehost-public-key.json \
             --output build/output/dev.enginehost.catsystem2.cst.v1.enginehost.tar.xz \
             --release-envelope build/output/enginehost-release.json \
             --public-key-document build/output/enginehost-public-key.json
