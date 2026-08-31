@@ -4,4 +4,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "enginehost-plugin-catsystem2"
-include(":app")
+include(":api", ":app")

@@ -1,1 +1,1 @@
-plugins { id("com.android.application") version "8.13.1" apply false }
+plugins { id("com.android.library") version "8.13.1" apply false }

@@ -1,18 +1,24 @@
-name: Android plugin
+name: Build Enginehost bundle
 
 on:
   push:
     branches: [plugin-core, "plugin/**"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  android:
+  bundle:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Droidtop/enginehost
+          ref: codex/engine-bundles
+          path: enginehost-tooling
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -21,15 +27,26 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
-      - name: Build plugin APK
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
-      - name: Verify plugin APK
+      - name: Build wrapper library
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+      - name: Build signed Enginehost bundle
+        env:
+          ENGINEHOST_SIGNING_KEY_PEM: ${{ secrets.ENGINEHOST_SIGNING_KEY_PEM }}
         run: |
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          test -f "$APK"
-          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump xmltree "$APK" AndroidManifest.xml | grep -q dev.enginehost.plugin.RUN
-          unzip -p "$APK" res/raw/enginehost_capabilities.json | grep -q catsystem2-cst-experimental
+          test -n "$ENGINEHOST_SIGNING_KEY_PEM"
+          mkdir -p build/payload build/output
+          unzip -p app/build/outputs/aar/app-release.aar classes.jar > build/classes.jar
+          "$ANDROID_HOME/build-tools/36.0.0/d8" --release --min-api 26 --output build/payload build/classes.jar
+          cp LICENSE THIRD_PARTY.md build/payload/
+          printf '%s' "$ENGINEHOST_SIGNING_KEY_PEM" > build/signing-key.pem
+          python3 enginehost-tooling/scripts/build-engine-bundle.py \
+            --metadata enginehost/bundle-metadata.json --payload build/payload \
+            --private-key build/signing-key.pem \
+            --output build/output/dev.enginehost.catsystem2.cst.v1.enginehost.tar.xz \
+            --release-envelope build/output/enginehost-release.json \
+            --public-key-document build/output/enginehost-public-key.json
+          cmp enginehost-public-key.json build/output/enginehost-public-key.json
       - uses: actions/upload-artifact@v4
         with:
-          name: enginehost-catsystem2-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: enginehost-catsystem2-cst-v1
+          path: build/output/*
