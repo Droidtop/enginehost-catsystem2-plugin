@@ -1,0 +1,13 @@
+{
+  "algorithm": "SHA256withECDSA",
+  "formatVersion": 1,
+  "issuer": {
+    "algorithm": "SHA256withECDSA",
+    "id": "enginehost-official-v1",
+    "keySha256": "E01B8F3DB54F70F3AC5390EC63158F754FEF1E3716BDCB8DF45E20315651A803",
+    "signature": "MEQCIG/ij45IcaOTOxVQG9F+RkvkeSgha16OCTXxedpXBM4JAiA3DVnnGDY0o5gumYlD7bgUMfOznbDsJ8odpxfWPTk3YA=="
+  },
+  "keySha256": "08D10C1C33C610CABB21E0A386C2DBE6CB4AC54B2CE34A6E31FB3CE2D3D2657A",
+  "origin": "https://github.com/droidtop/enginehost-catsystem2-plugin",
+  "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyOezJq+VGY3hq9uXaN2IMNJsGChJiOUx/ABEAh+Kafwh8F9htBl9bLPM4Q3jYQKeOEa4Hm6Z27ZfroxcyYIK2w=="
+}
