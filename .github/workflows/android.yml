@@ -8,14 +8,19 @@ on:
     inputs:
       publish:
         description: >-
-          Promote this build to a GitHub Release. Only for a bundle proven to
-          launch a real game on hardware -- a green build is not evidence of
-          that, and a bundle that installs and then dies is worse for a user
-          than one never offered.
+          Promote this build to a GitHub Release on the chosen channel. Stable is
+          for a bundle that has been used with real games on hardware; testing
+          for one that runs games but has not been lived with. Every push
+          already publishes to the unstable channel by itself.
         type: boolean
         default: false
+      channel:
+        description: "Release channel for a promoted build"
+        type: choice
+        options: [stable, testing]
+        default: stable
       tag:
-        description: "Release tag (default: derived from the bundle id)"
+        description: "Release tag (default: derived from the bundle id; testing adds -testing)"
         type: string
         default: ""
 
@@ -75,9 +80,10 @@ jobs:
           path: build/output/*
 
   publish:
-    # Publishing is deliberate: it runs only from a manual dispatch that asks
-    # for it, never on a push. Enginehost's catalog reads published releases,
-    # so anything landing here is something a user will be offered.
+    # Promotion is deliberate: a manual dispatch names the channel. Stable
+    # means used with real games on hardware; testing means it runs games
+    # but has not been lived with. Enginehost offers each person the channel
+    # they chose in Settings and every steadier one.
     needs: bundle
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
     runs-on: ubuntu-latest
@@ -87,22 +93,116 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release
-      - name: Publish the signed bundle
+      - name: Publish the signed bundle on the chosen channel
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          REQUESTED_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
-          test -f "$bundle"
+          if [ -z "$bundle" ]; then
+            echo "This branch's build produced no signed bundle; nothing to publish."
+            exit 0
+          fi
           id="$(basename "$bundle" .enginehost.tar.xz)"
-          tag="${{ inputs.tag }}"
+          envelope="$(find release -name 'enginehost-release.json' -print -quit)"
+          keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
+          test -f "$envelope"
+          # The envelope names its channel; the app filters on it. The signed
+          # manifest inside is untouched.
+          python3 - "$envelope" "$CHANNEL" <<'PY'
+          import json, sys
+          path, channel = sys.argv[1], sys.argv[2]
+          data = json.load(open(path))
+          data["channel"] = channel
+          json.dump(data, open(path, "w"), indent=2)
+          PY
+          tag="$REQUESTED_TAG"
           if [ -z "$tag" ]; then
             tag="$(printf '%s' "$id" | sed 's/^dev\.enginehost\.//; s/\./-/g')"
           fi
+          case "$CHANNEL" in
+            stable) prerelease="" ;;
+            testing) tag="$tag-testing"; prerelease="--prerelease" ;;
+            unstable) tag="$tag-unstable"; prerelease="--prerelease" ;;
+            *) echo "unknown channel $CHANNEL" >&2; exit 1 ;;
+          esac
+          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`${{ github.ref_name }}\` at \`${{ github.sha }}\` (build ${{ github.run_number }}). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
+          if [ "$CHANNEL" = unstable ]; then
+            # Rolling: the newest green build of the line is the whole release.
+            gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --title "$id (unstable)" $prerelease --notes "$notes"
+          elif gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --clobber
+            gh release edit "$tag" --repo "${{ github.repository }}" --notes "$notes"
+          else
+            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --title "$id ($CHANNEL)" $prerelease --notes "$notes"
+          fi
+
+  unstable:
+    # Every green push that produced a signed bundle is published as-is on
+    # the unstable channel, replacing the previous one, so a person who opted
+    # into unstable in Enginehost sees each build the moment CI is done with
+    # it. Branches whose build makes no bundle publish nothing.
+    needs: bundle
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+      - name: Publish the signed bundle on the unstable channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: unstable
+          REQUESTED_TAG: 
+        run: |
+          set -euo pipefail
+          bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
+          if [ -z "$bundle" ]; then
+            echo "This branch's build produced no signed bundle; nothing to publish."
+            exit 0
+          fi
+          id="$(basename "$bundle" .enginehost.tar.xz)"
           envelope="$(find release -name 'enginehost-release.json' -print -quit)"
           keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
-          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$tag" "$bundle" ${envelope:+"$envelope"} ${keydoc:+"$keydoc"}               --repo "${{ github.repository }}" --clobber
+          test -f "$envelope"
+          # The envelope names its channel; the app filters on it. The signed
+          # manifest inside is untouched.
+          python3 - "$envelope" "$CHANNEL" <<'PY'
+          import json, sys
+          path, channel = sys.argv[1], sys.argv[2]
+          data = json.load(open(path))
+          data["channel"] = channel
+          json.dump(data, open(path, "w"), indent=2)
+          PY
+          tag="$REQUESTED_TAG"
+          if [ -z "$tag" ]; then
+            tag="$(printf '%s' "$id" | sed 's/^dev\.enginehost\.//; s/\./-/g')"
+          fi
+          case "$CHANNEL" in
+            stable) prerelease="" ;;
+            testing) tag="$tag-testing"; prerelease="--prerelease" ;;
+            unstable) tag="$tag-unstable"; prerelease="--prerelease" ;;
+            *) echo "unknown channel $CHANNEL" >&2; exit 1 ;;
+          esac
+          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`${{ github.ref_name }}\` at \`${{ github.sha }}\` (build ${{ github.run_number }}). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
+          if [ "$CHANNEL" = unstable ]; then
+            # Rolling: the newest green build of the line is the whole release.
+            gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --title "$id (unstable)" $prerelease --notes "$notes"
+          elif gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --clobber
+            gh release edit "$tag" --repo "${{ github.repository }}" --notes "$notes"
           else
-            gh release create "$tag" "$bundle" ${envelope:+"$envelope"} ${keydoc:+"$keydoc"}               --repo "${{ github.repository }}" --title "$id"               --notes "Signed Enginehost bundle \`$id\`, built from \`${{ github.ref_name }}\` at \`${{ github.sha }}\`. Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
+            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --title "$id ($CHANNEL)" $prerelease --notes "$notes"
           fi
