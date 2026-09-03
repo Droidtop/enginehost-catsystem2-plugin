@@ -83,6 +83,9 @@ jobs:
           REQUESTED_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          # No artifact at all (a branch whose build makes no bundle) means no
+          # release directory either; that is "nothing to publish", not an error.
+          mkdir -p release
           bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
           if [ -z "$bundle" ]; then
             echo "This branch's build produced no signed bundle; nothing to publish."
@@ -147,6 +150,9 @@ jobs:
           REQUESTED_TAG: 
         run: |
           set -euo pipefail
+          # No artifact at all (a branch whose build makes no bundle) means no
+          # release directory either; that is "nothing to publish", not an error.
+          mkdir -p release
           bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
           if [ -z "$bundle" ]; then
             echo "This branch's build produced no signed bundle; nothing to publish."
