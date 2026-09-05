@@ -1,0 +1,47 @@
+name: Build the engine
+
+# The engine is built and exercised on Linux, with no Android anywhere near it.
+# That is the point of it living on its own branch: a change can be compiled and
+# run before any console is involved. Games are not in this repository, so CI
+# builds the engine and runs it far enough to prove the binary works; drawing a
+# real frame is `make check GAME=...` against a game you own.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL2 and zlib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev zlib1g-dev
+      - name: Build
+        run: make
+      - name: The binary runs and says what it takes
+        run: |
+          ./bin/catsystem2 2>&1 | tee /tmp/usage.txt || true
+          grep -q -- '--shot' /tmp/usage.txt
+      - name: A folder that is not a game is refused, not crashed on
+        run: |
+          mkdir -p /tmp/empty
+          if ./bin/catsystem2 /tmp/empty --steps 1 --shot /tmp/nothing.png; then
+            echo "an empty folder should not have played"
+            exit 1
+          fi
+      - name: The data tables are what their generator produces
+        run: |
+          python3 tools/gen_cp932.py > /tmp/cp932_table.h
+          diff -u src/cp932_table.h /tmp/cp932_table.h
