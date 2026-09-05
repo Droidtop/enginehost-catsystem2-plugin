@@ -58,6 +58,10 @@ struct cs2_kcs {
 
     uint32_t switch_value;
 
+    int suspended;              /* a call that could not answer this frame */
+    uint32_t suspend_address;
+    uint32_t suspend_answer;
+
     cs2_kcs_gcall gcall;
     void *gcall_context;
     uint8_t seen[KCS_GCALL_COUNT];
@@ -192,6 +196,19 @@ void cs2_kcs_set_gcall(cs2_kcs *script, cs2_kcs_gcall gcall, void *context) {
 void cs2_kcs_trace(cs2_kcs *script, int on) {
     script->trace = on;
 }
+
+void cs2_kcs_suspend(cs2_kcs *script, uint32_t answer_address) {
+    script->suspended = 1;
+    script->suspend_address = answer_address;
+    script->suspend_answer = 0;
+}
+
+void cs2_kcs_answer(cs2_kcs *script, uint32_t value) {
+    script->suspend_answer = value;
+}
+
+int cs2_kcs_suspended(const cs2_kcs *script) { return script->suspended; }
+uint32_t cs2_kcs_suspend_address(const cs2_kcs *script) { return script->suspend_address; }
 
 uint64_t cs2_kcs_instructions(const cs2_kcs *script) { return script->instructions; }
 uint32_t cs2_kcs_pc(const cs2_kcs *script) { return script->pc; }
@@ -491,6 +508,9 @@ static int do_gcall(cs2_kcs *script, uint32_t at_opcode) {
 
     uint32_t answer = 0;
     const uint8_t *arguments = script->memory + script->sp;
+    int result = script->gcall != NULL
+        ? script->gcall(script->gcall_context, script, id, arguments, argument_size, &answer)
+        : CS2_KCS_UNWRITTEN;
     /*
      * A call nobody has written yet answers zero and is let through, so that a
      * run gets as far as it can and reports the whole path it wanted rather
@@ -499,10 +519,11 @@ static int do_gcall(cs2_kcs *script, uint32_t at_opcode) {
      * end of the statement anyway, while a caller that wanted one and got
      * nothing would take someone else's value off the stack.
      */
-    int written = script->gcall != NULL;
-    int result = written
-        ? script->gcall(script->gcall_context, script, id, arguments, argument_size, &answer)
-        : CS2_KCS_DONE_VALUE;
+    int written = result >= 0;
+    if (!written) {
+        answer = 0;
+        result = CS2_KCS_DONE_VALUE;
+    }
 
     /* Each function is named once: this is how the boot path names itself. */
     if (id < KCS_GCALL_COUNT && !script->seen[id]) {
@@ -805,6 +826,18 @@ static int step(cs2_kcs *script) {
 
 int cs2_kcs_frame(cs2_kcs *script, uint32_t budget) {
     if (script->fault) return -1;
+    /*
+     * A frame begins by answering whatever the last one stopped waiting for.
+     * The answer is on the stack for the test that follows the call, and it is
+     * zero unless something happened; the address the caller gave is where the
+     * engine will have put what happened.
+     */
+    if (script->suspended) {
+        script->suspended = 0;
+        push(script, script->suspend_answer);
+        script->suspend_answer = 0;
+        if (script->fault) return -1;
+    }
     for (uint32_t i = 0; budget == 0 || i < budget; i++) {
         int more = step(script);
         if (script->fault) return -1;

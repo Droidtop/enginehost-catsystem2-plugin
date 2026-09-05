@@ -35,6 +35,7 @@ typedef struct cs2_kcs cs2_kcs;
  * next frame, until it stops asking.
  */
 enum {
+    CS2_KCS_UNWRITTEN = -1,       /* not one of ours: answer zero and say so once */
     CS2_KCS_DONE_YIELD = 0,       /* finished, no value, stop for this frame */
     CS2_KCS_DONE_VALUE = 1,       /* finished, answers a value, keep running */
     CS2_KCS_DONE = 2,             /* finished, no value, keep running */
@@ -69,6 +70,19 @@ void *cs2_kcs_variables(cs2_kcs *script, uint32_t *size);
 
 /* Logs every GCALL id the first time the script reaches it. */
 void cs2_kcs_trace(cs2_kcs *script, int on);
+
+/*
+ * How a script waits. A function that cannot answer now says so with
+ * cs2_kcs_suspend and CS2_KCS_DONE_YIELD_AGAIN; the frame ends there, and the
+ * next frame begins by handing the script the answer - zero, unless something
+ * has happened in between and the engine has set one with cs2_kcs_answer. That
+ * is the whole of the game's own waiting: the address is where the engine puts
+ * what happened, and the answer is whether anything did.
+ */
+void cs2_kcs_suspend(cs2_kcs *script, uint32_t answer_address);
+void cs2_kcs_answer(cs2_kcs *script, uint32_t value);
+int cs2_kcs_suspended(const cs2_kcs *script);
+uint32_t cs2_kcs_suspend_address(const cs2_kcs *script);
 
 /*
  * Runs until the script yields, giving up after a budget of instructions so a

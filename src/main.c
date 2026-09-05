@@ -18,6 +18,7 @@
 #include "render.h"
 #include "scene.h"
 #include "startup.h"
+#include "system.h"
 
 /* Draws named images over one another, for working out how parts are named. */
 int cs2_draw_images(cs2_files *files, const char *names, const char *path);
@@ -177,6 +178,12 @@ int main(int argc, char **argv) {
             cs2_files_close(files);
             return 1;
         }
+        cs2_system *system = cs2_system_new(files);
+        if (system == NULL) {
+            fprintf(stderr, "%s\n", cs2_error());
+            return 1;
+        }
+        cs2_kcs_set_gcall(system_script, cs2_system_gcall, system);
         cs2_kcs_trace(system_script, 1);
         cs2_log("running %s", path);
         int running = 1, frame = 0;
@@ -188,6 +195,7 @@ int main(int argc, char **argv) {
                 (unsigned long long) cs2_kcs_instructions(system_script),
                 cs2_kcs_pc(system_script), running == 0 ? ", the script ended" : "");
         cs2_kcs_free(system_script);
+        cs2_system_free(system);
         cs2_startup_free(startup);
         cs2_files_close(files);
         return running < 0 ? 1 : 0;
