@@ -4,7 +4,7 @@
 # nothing is copied and nothing is written twice. src/main.c is left out because
 # it is the desktop window, and jni.c beside this file takes its place: it hands
 # Java the buffer of pixels the engine draws into. The engine needs nothing but
-# zlib, which Android has.
+# zlib and, for sound, AAudio, both of which Android has.
 
 cmake_minimum_required(VERSION 3.22)
 project(catsystem2 C)
@@ -23,4 +23,4 @@ endif()
 add_library(catsystem2 SHARED ${ENGINE_SOURCES} jni.c)
 target_include_directories(catsystem2 PRIVATE ${ENGINE_DIR} ${VENDOR_DIR})
 target_compile_options(catsystem2 PRIVATE -std=c11 -Wall -Wextra -O2)
-target_link_libraries(catsystem2 PRIVATE z log m)
+target_link_libraries(catsystem2 PRIVATE z log m aaudio)

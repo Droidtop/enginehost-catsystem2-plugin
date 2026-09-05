@@ -11,8 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <aaudio/AAudio.h>
 #include <android/log.h>
 
+#include "audio.h"
 #include "files.h"
 #include "render.h"
 #include "scene.h"
@@ -27,6 +29,8 @@ typedef struct {
     cs2_text *text;
     cs2_scene *scene;
     cs2_render *render;
+    cs2_audio *audio;
+    AAudioStream *sound;
     char note[256];
 } session;
 
@@ -59,8 +63,64 @@ static int first_scene_script(cs2_files *files, char *out, size_t out_size) {
     return 0;
 }
 
+/*
+ * Sound. AAudio asks for samples on its own thread and the engine mixes into
+ * whatever buffer it is handed, so this is the whole of it; the stream is
+ * opened before it is started, so the mixer is always in place by the time the
+ * first callback runs. A game with no sound device still plays: the engine
+ * reads the sound commands either way and nothing here is required.
+ */
+static aaudio_data_callback_result_t feed_audio(AAudioStream *stream, void *user,
+                                                void *frames, int32_t count) {
+    (void) stream;
+    session *state = (session *) user;
+    cs2_audio_mix(state->audio, (int16_t *) frames, count);
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+static void open_sound(session *state) {
+    AAudioStreamBuilder *builder = NULL;
+    if (AAudio_createStreamBuilder(&builder) != AAUDIO_OK) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "no sound: AAudio will not start");
+        return;
+    }
+    AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setChannelCount(builder, 2);
+    AAudioStreamBuilder_setDataCallback(builder, feed_audio, state);
+    AAudioStream *stream = NULL;
+    aaudio_result_t opened = AAudioStreamBuilder_openStream(builder, &stream);
+    AAudioStreamBuilder_delete(builder);
+    if (opened != AAUDIO_OK || stream == NULL) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "no sound: %s",
+                            AAudio_convertResultToText(opened));
+        return;
+    }
+    state->audio = cs2_audio_new(state->files, AAudioStream_getSampleRate(stream));
+    if (state->audio == NULL) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "no sound: %s", cs2_error());
+        AAudioStream_close(stream);
+        return;
+    }
+    cs2_scene_set_audio(state->scene, state->audio);
+    state->sound = stream;
+    AAudioStream_requestStart(stream);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "sound at %d Hz",
+                        cs2_audio_rate(state->audio));
+}
+
+static void close_sound(session *state) {
+    if (state->sound != NULL) {
+        AAudioStream_requestStop(state->sound);
+        AAudioStream_close(state->sound);
+        state->sound = NULL;
+    }
+    cs2_audio_free(state->audio);
+    state->audio = NULL;
+}
+
 static void close_session(session *state) {
     if (state == NULL) return;
+    close_sound(state);
     cs2_render_free(state->render);
     cs2_scene_free(state->scene);
     cs2_text_free(state->text);
@@ -135,6 +195,7 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
         cs2_startup_number(state->startup, "SCREEN/width", 1024),
         cs2_startup_number(state->startup, "SCREEN/height", 576));
     if (state->render == NULL) goto failed;
+    open_sound(state);
 
     (*env)->ReleaseStringUTFChars(env, game_path, root);
     if (wanted != NULL) (*env)->ReleaseStringUTFChars(env, wanted_script, wanted);
@@ -154,6 +215,18 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeClose(
     (void) env;
     (void) type;
     close_session(from_handle(handle));
+}
+
+/* The reader left the game; the music should not follow them out of it. */
+JNIEXPORT void JNICALL
+Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeSetSounding(
+        JNIEnv *env, jclass type, jlong handle, jboolean sounding) {
+    (void) env;
+    (void) type;
+    session *state = from_handle(handle);
+    if (state == NULL || state->sound == NULL) return;
+    if (sounding) AAudioStream_requestStart(state->sound);
+    else AAudioStream_requestPause(state->sound);
 }
 
 JNIEXPORT jstring JNICALL
