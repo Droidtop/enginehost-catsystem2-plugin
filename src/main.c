@@ -11,6 +11,7 @@
 
 #include <SDL.h>
 
+#include "audio.h"
 #include "files.h"
 #include "png.h"
 #include "render.h"
@@ -31,7 +32,21 @@ static void usage(void) {
         "  --image <names>   draw these images over one another and exit; a character\n"
         "                    is a body and a set of parts, and which suffix is which\n"
         "                    is learnt by looking\n"
+        "  --silent          play the scene without opening a sound device\n"
         "  --quiet           say nothing but what was asked for\n");
+}
+
+/*
+ * SDL asks for samples on its own thread; the engine mixes into whatever buffer
+ * it is handed, so this is the whole of the desktop sound output. The mixer is
+ * reached through a file-scope pointer because the device has to be opened
+ * before its real output rate is known, and the mixer is built from that rate.
+ */
+static cs2_audio *desktop_audio;
+
+static void feed_audio(void *user, Uint8 *stream, int bytes) {
+    (void) user;
+    cs2_audio_mix(desktop_audio, (int16_t *) stream, bytes / (int) (2 * sizeof(int16_t)));
 }
 
 /* The first script of scene.int, in name order, for a game we cannot boot. */
@@ -65,6 +80,7 @@ int main(int argc, char **argv) {
     const char *shot = NULL;
     const char *list = NULL;
     const char *images = NULL;
+    int silent = 0;
     int steps = 1;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
@@ -72,6 +88,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
         else if (strcmp(argv[i], "--list") == 0 && i + 1 < argc) list = argv[++i];
         else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) images = argv[++i];
+        else if (strcmp(argv[i], "--silent") == 0) silent = 1;
         else if (strcmp(argv[i], "--quiet") == 0) cs2_log_quiet(1);
         else {
             usage();
@@ -159,16 +176,52 @@ int main(int argc, char **argv) {
     cs2_log("playing %s (%zu lines)%s%s", cs2_scene_path(scene), cs2_scene_line_count(scene),
             note == NULL ? "" : "; ", note == NULL ? "" : note);
 
+    /*
+     * A drawn-and-saved frame is a still picture, so it opens no sound device;
+     * a window does, before the script is stepped, so that music the opening
+     * asks for is already sounding when the first frame appears.
+     */
+    if (shot != NULL) silent = 1;
+    Uint32 systems = shot != NULL ? 0 : SDL_INIT_VIDEO;
+    if (!silent) systems |= SDL_INIT_AUDIO;
+    if (SDL_Init(systems) != 0) {
+        fprintf(stderr, "SDL will not start: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    cs2_audio *audio = NULL;
+    SDL_AudioDeviceID sound = 0;
+    if (!silent) {
+        SDL_AudioSpec wanted = {0}, got = {0};
+        wanted.freq = 48000;
+        wanted.format = AUDIO_S16SYS;
+        wanted.channels = 2;
+        wanted.samples = 1024;
+        wanted.callback = feed_audio;
+        sound = SDL_OpenAudioDevice(NULL, 0, &wanted, &got, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+        if (sound == 0) {
+            cs2_log("no sound device (%s); playing silently", SDL_GetError());
+        } else {
+            /* The device opens paused, so the mixer is in place before it runs. */
+            audio = cs2_audio_new(files, got.freq);
+            if (audio == NULL) {
+                cs2_log("%s", cs2_error());
+                SDL_CloseAudioDevice(sound);
+                sound = 0;
+            } else {
+                desktop_audio = audio;
+                cs2_scene_set_audio(scene, audio);
+                SDL_PauseAudioDevice(sound, 0);
+            }
+        }
+    }
+
     for (int i = 0; i < (steps < 1 ? 1 : steps); i++) cs2_scene_advance(scene);
     const char *skipped = cs2_scene_take_skipped(scene);
     if (skipped[0] != '\0') cs2_log("commands not carried out yet: %s", skipped);
 
     int width = cs2_startup_number(startup, "SCREEN/width", 1024);
     int height = cs2_startup_number(startup, "SCREEN/height", 576);
-    if (SDL_Init(shot != NULL ? 0 : SDL_INIT_VIDEO) != 0) {
-        fprintf(stderr, "SDL will not start: %s\n", SDL_GetError());
-        return 1;
-    }
     cs2_render *render = cs2_render_new(files, width, height);
     if (render == NULL) {
         fprintf(stderr, "%s\n", cs2_error());
@@ -233,8 +286,14 @@ int main(int argc, char **argv) {
         if (window != NULL) SDL_DestroyWindow(window);
     }
 
+    if (sound != 0) {
+        SDL_PauseAudioDevice(sound, 1);
+        SDL_CloseAudioDevice(sound);
+    }
+    desktop_audio = NULL;
     cs2_render_free(render);
     cs2_scene_free(scene);
+    cs2_audio_free(audio);
     cs2_text_free(text);
     cs2_startup_free(startup);
     cs2_files_close(files);

@@ -16,6 +16,7 @@
 #ifndef CS2_SCENE_H
 #define CS2_SCENE_H
 
+#include "audio.h"
 #include "expr.h"
 #include "files.h"
 #include "text.h"
@@ -54,6 +55,13 @@ typedef struct cs2_scene cs2_scene;
 /* The files and the formatter must outlive the scene. */
 cs2_scene *cs2_scene_new(cs2_files *files, const cs2_text *text);
 void cs2_scene_free(cs2_scene *scene);
+
+/*
+ * Hands the player a mixer to sound the script's bgm, se and pcm commands on.
+ * Without one those commands are still read and understood, and heard by nobody:
+ * the desktop runner drawing a single frame opens no sound device.
+ */
+void cs2_scene_set_audio(cs2_scene *scene, cs2_audio *audio);
 
 /* Loads a script by archive path, such as "scene.int/ama_001.cst". */
 int cs2_scene_play(cs2_scene *scene, const char *script_path);
