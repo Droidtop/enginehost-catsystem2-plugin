@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "audio.h"
 #include "cst.h"
 
 #define MAX_LAYERS 64
@@ -14,6 +15,7 @@
 struct cs2_scene {
     cs2_files *files;
     const cs2_text *text;
+    cs2_audio *audio;
     cs2_vars *vars;
     cs2_cst *script;
     char path[512];
@@ -41,6 +43,10 @@ cs2_scene *cs2_scene_new(cs2_files *files, const cs2_text *text) {
         return NULL;
     }
     return scene;
+}
+
+void cs2_scene_set_audio(cs2_scene *scene, cs2_audio *audio) {
+    scene->audio = audio;
 }
 
 void cs2_scene_free(cs2_scene *scene) {
@@ -335,6 +341,83 @@ static void assign(cs2_scene *scene, const char *line) {
     cs2_vars_set_number(scene->vars, slot, value);
 }
 
+/* Whether a word is a plain number, which is how a bank is told from a name. */
+static int is_number(const char *word) {
+    if (*word == '-' || *word == '+') word++;
+    if (*word == '\0') return 0;
+    for (; *word != '\0'; word++) {
+        if (*word < '0' || *word > '9') return 0;
+    }
+    return 1;
+}
+
+/* ---- sound ---- */
+
+/*
+ * "bgm 0 bgm18", "se 0 loop se0032b", "pcm AMA_ama_001_001": a kind, an
+ * optional bank number, and then either a file name to play or one of a few
+ * words that act on what the bank already holds. The bank is left out often
+ * enough that its absence is part of the grammar rather than a mistake, so a
+ * word that does not parse as a number is the file name.
+ *
+ * Returns 1 when the line was a sound command, whether or not there is a device
+ * to play it on: the script is understood either way, and a frontend that opened
+ * no mixer should not have the line reported as one the engine cannot do.
+ */
+static int sound_command(cs2_scene *scene, char words[][128], int count) {
+    int kind;
+    if (cs2_ieq(words[0], "bgm")) kind = CS2_SOUND_BGM;
+    else if (cs2_ieq(words[0], "se") || cs2_ieq(words[0], "hse")) kind = CS2_SOUND_SE;
+    else if (cs2_ieq(words[0], "pcm")) kind = CS2_SOUND_PCM;
+    else return 0;
+
+    int at = 1;
+    int bank = 0;
+    if (count > 1 && is_number(words[1])) {
+        bank = atoi(words[1]);
+        at = 2;
+    }
+    if (bank < 0 || bank >= 16) bank = 0;
+
+    /* A kind on its own, or a bank on its own, silences it. */
+    if (at >= count) {
+        if (at == 1) cs2_audio_stop_kind(scene->audio, kind, 0);
+        else cs2_audio_stop(scene->audio, kind, bank, 0);
+        return 1;
+    }
+
+    const char *what = words[at];
+    int rest = count - at - 1;
+    if (cs2_ieq(what, "end") || cs2_ieq(what, "stop")) {
+        cs2_audio_stop(scene->audio, kind, bank, rest >= 1 ? atoi(words[at + 1]) : 0);
+    } else if (cs2_ieq(what, "vol")) {
+        int wanted = rest >= 1 ? atoi(words[at + 1]) : 100;
+        cs2_audio_volume(scene->audio, kind, bank, -1, wanted, 0);
+    } else if (cs2_ieq(what, "fade")) {
+        /* fade <frames> <from> <to>; with one number it is only how long. */
+        int frames = rest >= 1 ? atoi(words[at + 1]) : 0;
+        int from = rest >= 2 ? atoi(words[at + 2]) : -1;
+        int to = rest >= 3 ? atoi(words[at + 3]) : 0;
+        cs2_audio_volume(scene->audio, kind, bank, from, to, frames);
+    } else if (cs2_ieq(what, "loop")) {
+        if (rest >= 1 && cs2_audio_play(scene->audio, kind, bank, words[at + 1], 1) != 0) {
+            cs2_log("%s", cs2_error());
+        }
+    } else if (cs2_ieq(what, "pause") || cs2_ieq(what, "replay") || cs2_ieq(what, "move")
+               || cs2_ieq(what, "pos") || cs2_ieq(what, "rot") || cs2_ieq(what, "base")) {
+        /* Placement and pausing of a playing sound; not modelled, so said out loud. */
+        char detail[64];
+        snprintf(detail, sizeof detail, "%.24s.%.24s", words[0], what);
+        note(scene, detail);
+    } else {
+        /* Music holds under the scene; an effect or a voice plays once. */
+        if (cs2_audio_play(scene->audio, kind, bank, what, kind == CS2_SOUND_BGM) != 0) {
+            cs2_log("%s", cs2_error());
+        }
+    }
+    return 1;
+}
+
 /*
  * Carries out one command line. Returns the script to continue with, copied
  * into next_script, or NULL when the command was not a jump.
@@ -374,6 +457,7 @@ static const char *run_command(cs2_scene *scene, const char *line,
     else if (cs2_ieq(words[0], "fg")) layer_command(scene, CS2_LAYER_FOREGROUND, words, count);
     else if (cs2_ieq(words[0], "fw")) layer_command(scene, CS2_LAYER_FACE, words, count);
     else if (cs2_ieq(words[0], "eg")) layer_command(scene, CS2_LAYER_EFFECT, words, count);
+    else if (sound_command(scene, words, count)) { /* handled */ }
     else if (cs2_ieq(words[0], "str")) {
         int32_t slot = 0;
         if (count >= 3 && number(scene, words[1], &slot) == 0) {
