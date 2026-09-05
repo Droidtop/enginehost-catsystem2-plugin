@@ -13,6 +13,7 @@
 
 #include "audio.h"
 #include "files.h"
+#include "kcs.h"
 #include "png.h"
 #include "render.h"
 #include "scene.h"
@@ -24,6 +25,10 @@ int cs2_draw_images(cs2_files *files, const char *names, const char *path);
 static void usage(void) {
     fprintf(stderr,
         "catsystem2 <game folder> [options]\n"
+        "  --kcs [<name>]    run the game's own system script - its title screen and\n"
+        "                    menus - instead of playing a scene, and say which of the\n"
+        "                    engine's functions it asks for\n"
+        "  --frames <n>      how many frames of it to run (default 60)\n"
         "  --script <name>   play this script instead of the game's own entry point,\n"
         "                    as \"ama_001.cst\" or \"scene.int/ama_001.cst\"\n"
         "  --steps <n>       advance n times before showing anything (default 1)\n"
@@ -80,10 +85,17 @@ int main(int argc, char **argv) {
     const char *shot = NULL;
     const char *list = NULL;
     const char *images = NULL;
+    const char *kcs_script = NULL;
+    int kcs_frames = 0;
     int silent = 0;
     int steps = 1;
     for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
+        if (strcmp(argv[i], "--kcs") == 0) {
+            if (kcs_frames == 0) kcs_frames = 60;
+            if (i + 1 < argc && argv[i + 1][0] != '-') kcs_script = argv[++i];
+        }
+        else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) kcs_frames = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
         else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
         else if (strcmp(argv[i], "--list") == 0 && i + 1 < argc) list = argv[++i];
@@ -142,6 +154,43 @@ int main(int argc, char **argv) {
         cs2_bytes_free(&document);
     } else {
         cs2_log("this game has no startup.xml; falling back to a 1024x576 screen");
+    }
+
+    /*
+     * The game's own front end: the title screen, its menus, its new game and
+     * its saves are all one compiled system script. It is run on its own here
+     * because the machine is new and what a run has to say first is which of
+     * the engine's thousand functions the boot path asks for, and in what order.
+     */
+    if (kcs_frames > 0) {
+        char path[512];
+        const char *entry = cs2_startup_value(startup, "SCRIPT/start");
+        if (kcs_script != NULL) entry = kcs_script;
+        else if (entry == NULL || ends_with_cst(entry)) entry = "main.kcs";
+        if (strchr(entry, '/') != NULL) snprintf(path, sizeof path, "%s", entry);
+        else snprintf(path, sizeof path, "kcs.int/%s", entry);
+
+        cs2_kcs *system_script = cs2_kcs_load(files, path);
+        if (system_script == NULL) {
+            fprintf(stderr, "%s\n", cs2_error());
+            cs2_startup_free(startup);
+            cs2_files_close(files);
+            return 1;
+        }
+        cs2_kcs_trace(system_script, 1);
+        cs2_log("running %s", path);
+        int running = 1, frame = 0;
+        for (; running == 1 && frame < kcs_frames; frame++) {
+            running = cs2_kcs_frame(system_script, 2000000);
+        }
+        if (running < 0) fprintf(stderr, "%s\n", cs2_error());
+        cs2_log("%s: %d frames, %llu instructions, stopped at %#x%s", path, frame,
+                (unsigned long long) cs2_kcs_instructions(system_script),
+                cs2_kcs_pc(system_script), running == 0 ? ", the script ended" : "");
+        cs2_kcs_free(system_script);
+        cs2_startup_free(startup);
+        cs2_files_close(files);
+        return running < 0 ? 1 : 0;
     }
 
     cs2_text *text = cs2_text_from(startup);
