@@ -46,6 +46,14 @@ public final class CatSystem2Plugin implements EnginePlugin {
         session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
     }
 
+    @Override public void onPause() {
+        if (engine != 0) nativeSetSounding(engine, false);
+    }
+
+    @Override public void onResume() {
+        if (engine != 0) nativeSetSounding(engine, true);
+    }
+
     @Override public void onDestroy() {
         if (view != null) view.save();
         if (engine != 0) {
@@ -181,6 +189,7 @@ public final class CatSystem2Plugin implements EnginePlugin {
 
     private static native long nativeOpen(String gamePath, String script);
     private static native void nativeClose(long engine);
+    private static native void nativeSetSounding(long engine, boolean sounding);
     private static native String nativeError();
     private static native int nativeWidth(long engine);
     private static native int nativeHeight(long engine);
