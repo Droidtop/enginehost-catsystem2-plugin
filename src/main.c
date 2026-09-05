@@ -17,6 +17,9 @@
 #include "scene.h"
 #include "startup.h"
 
+/* Draws named images over one another, for working out how parts are named. */
+int cs2_draw_images(cs2_files *files, const char *names, const char *path);
+
 static void usage(void) {
     fprintf(stderr,
         "catsystem2 <game folder> [options]\n"
@@ -25,6 +28,9 @@ static void usage(void) {
         "  --steps <n>       advance n times before showing anything (default 1)\n"
         "  --shot <file>     draw one frame into a PNG and exit, opening no window\n"
         "  --list <archive>  print an archive's entry names and exit\n"
+        "  --image <names>   draw these images over one another and exit; a character\n"
+        "                    is a body and a set of parts, and which suffix is which\n"
+        "                    is learnt by looking\n"
         "  --quiet           say nothing but what was asked for\n");
 }
 
@@ -58,12 +64,14 @@ int main(int argc, char **argv) {
     const char *wanted_script = NULL;
     const char *shot = NULL;
     const char *list = NULL;
+    const char *images = NULL;
     int steps = 1;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
         else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
         else if (strcmp(argv[i], "--list") == 0 && i + 1 < argc) list = argv[++i];
+        else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) images = argv[++i];
         else if (strcmp(argv[i], "--quiet") == 0) cs2_log_quiet(1);
         else {
             usage();
@@ -96,6 +104,17 @@ int main(int argc, char **argv) {
         }
         cs2_files_close(files);
         return 0;
+    }
+
+    if (images != NULL) {
+        if (shot == NULL) {
+            fprintf(stderr, "--image needs --shot to say where to draw\n");
+            cs2_files_close(files);
+            return 2;
+        }
+        int result = cs2_draw_images(files, images, shot);
+        cs2_files_close(files);
+        return result;
     }
 
     cs2_bytes document;

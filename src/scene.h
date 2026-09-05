@@ -31,7 +31,15 @@ typedef struct {
     int kind;
     int slot;
     int is_colour;
-    char image[128];
+    char image[160];
+    /*
+     * A character is drawn as a body with face parts over it. The script names
+     * them together, "Ttas02l,1,1,d,d": the name, the body, and then the parts,
+     * which are separate images in the same archive whose own offsets say where
+     * on the body they belong.
+     */
+    char parts[4][160];
+    int part_count;
     int frame;
     uint32_t colour;
     int x;
