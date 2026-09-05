@@ -1,8 +1,6 @@
 package dev.enginehost.plugin.catsystem2;
 
 import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -22,10 +20,13 @@ final class CstScript {
 
     record Line(int type, String content) {}
 
-    static List<Line> read(File file) throws IOException {
-        byte[] container = readAll(file);
+    /**
+     * Parses one script. {@code name} only names it in error messages; the
+     * bytes come from a loose file or straight out of an archive entry.
+     */
+    static List<Line> read(byte[] container, String name) throws IOException {
         if (container.length < 16 || !"CatScene".equals(new String(container, 0, 8, Charset.forName("US-ASCII")))) {
-            throw new IOException("Not a CatSystem2 CatScene script: " + file.getName());
+            throw new IOException("Not a CatSystem2 CatScene script: " + name);
         }
         ByteBuffer header = ByteBuffer.wrap(container).order(ByteOrder.LITTLE_ENDIAN);
         int compressedSize = header.getInt(8);
@@ -83,16 +84,6 @@ final class CstScript {
                 output.write(chunk, 0, count);
             }
             if (total != expected) throw new IOException("CST decompressed size mismatch");
-            return output.toByteArray();
-        }
-    }
-
-    private static byte[] readAll(File file) throws IOException {
-        if (file.length() > 128L * 1024 * 1024) throw new IOException("CST file is too large");
-        try (FileInputStream input = new FileInputStream(file);
-             ByteArrayOutputStream output = new ByteArrayOutputStream((int) file.length())) {
-            byte[] chunk = new byte[8192];
-            for (int count; (count = input.read(chunk)) >= 0;) output.write(chunk, 0, count);
             return output.toByteArray();
         }
     }
