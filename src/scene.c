@@ -215,17 +215,47 @@ static void layer_command(cs2_scene *scene, int kind, char words[MAX_WORDS][128]
         return;
     }
 
-    /* An image name can carry the engine's own pose and animation selectors
-       after commas. Which frame each selector picks is not worked out yet, so
-       the first frame is drawn and the selectors are noted. */
+    /*
+     * A character is named with its parts: "Ttas02l,1,1,d,d" is the sprite
+     * Ttas02l, body 1, and then the parts 1, d and d. Each is its own image in
+     * the archive - Ttas02l_1, Ttas02l_001, Ttas02l_00d - and each carries the
+     * offset that puts it where it belongs on the body, so drawing them in
+     * order is the whole of it. A name with no commas is one image as it is.
+     */
+    char name[100];
     size_t name_length = strcspn(third, ",");
-    if (name_length >= sizeof layer.image) name_length = sizeof layer.image - 1;
-    memcpy(layer.image, third, name_length);
-    layer.image[name_length] = '\0';
-    if (third[name_length] == ',') {
-        char what[64];
-        snprintf(what, sizeof what, "%s.parts", words[0]);
-        note(scene, what);
+    if (name_length >= sizeof name) name_length = sizeof name - 1;
+    memcpy(name, third, name_length);
+    name[name_length] = '\0';
+    if (third[name_length] != ',') {
+        snprintf(layer.image, sizeof layer.image, "%s", name);
+    } else {
+        const char *at = third + name_length + 1;
+        for (int part = 0; *at != '\0'; part++) {
+            char code[8];
+            size_t code_length = strcspn(at, ",");
+            if (code_length >= sizeof code) code_length = sizeof code - 1;
+            memcpy(code, at, code_length);
+            code[code_length] = '\0';
+            at += strcspn(at, ",");
+            if (*at == ',') at++;
+            if (code[0] == '\0') continue;
+            if (part == 0) {
+                snprintf(layer.image, sizeof layer.image, "%s_%s", name, code);
+            } else if (layer.part_count < 4) {
+                char full[128];
+                snprintf(full, sizeof full, "%s_00%s", name, code);
+                int already = 0;
+                for (int i = 0; i < layer.part_count; i++) {
+                    if (strcmp(layer.parts[i], full) == 0) already = 1;
+                }
+                if (!already) {
+                    snprintf(layer.parts[layer.part_count], sizeof layer.parts[0], "%s", full);
+                    layer.part_count++;
+                }
+            }
+        }
+        if (layer.image[0] == '\0') snprintf(layer.image, sizeof layer.image, "%s", name);
     }
     int32_t x = 0;
     int32_t y = 0;

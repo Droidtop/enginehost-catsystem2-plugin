@@ -7,6 +7,7 @@
 
 #include "font.h"
 #include "hg3.h"
+#include "png.h"
 
 #define CACHE_SIZE 12
 
@@ -220,6 +221,10 @@ const uint32_t *cs2_render_frame(cs2_render *render, const cs2_scene *scene, con
         }
         const cs2_hg3_frame *frame = image(render, layer->image);
         if (frame != NULL) draw_image(render, frame, layer->x, layer->y, layer->alpha);
+        for (int part = 0; part < layer->part_count; part++) {
+            const cs2_hg3_frame *over = image(render, layer->parts[part]);
+            if (over != NULL) draw_image(render, over, layer->x, layer->y, layer->alpha);
+        }
     }
 
     const char *speaker = cs2_scene_speaker(scene);
@@ -239,4 +244,37 @@ const uint32_t *cs2_render_frame(cs2_render *render, const cs2_scene *scene, con
         draw_line(render, render->small_font, status, 12, 6, 0xff6d7f8au);
     }
     return render->canvas;
+}
+
+/*
+ * Draws named images over one another into a PNG. This exists to answer a
+ * question the scripts do not: a character is a body and a set of parts, named
+ * with suffixes the scripts index by, and the only way to learn which suffix is
+ * which is to lay them over one another and look.
+ */
+int cs2_draw_images(cs2_files *files, const char *names, const char *path) {
+    cs2_render *render = cs2_render_new(files, 1024, 768);
+    if (render == NULL) {
+        fprintf(stderr, "%s\n", cs2_error());
+        return 1;
+    }
+    for (size_t i = 0; i < (size_t) render->width * render->height; i++) {
+        render->canvas[i] = 0xff202020u;
+    }
+    char list[1024];
+    snprintf(list, sizeof list, "%s", names);
+    int drawn = 0;
+    for (char *name = strtok(list, ","); name != NULL; name = strtok(NULL, ",")) {
+        const cs2_hg3_frame *frame = image(render, name);
+        if (frame == NULL) continue;
+        cs2_log("%s: %dx%d at %d,%d of %dx%d, base %d,%d", name, frame->width, frame->height,
+                frame->offset_x, frame->offset_y, frame->total_width, frame->total_height,
+                frame->base_x, frame->base_y);
+        draw_image(render, frame, 0, 0, 255);
+        drawn++;
+    }
+    int result = drawn == 0 ? 1 : cs2_png_write(path, render->canvas, render->width, render->height);
+    if (result != 0) fprintf(stderr, "%s\n", cs2_error());
+    cs2_render_free(render);
+    return result;
 }
