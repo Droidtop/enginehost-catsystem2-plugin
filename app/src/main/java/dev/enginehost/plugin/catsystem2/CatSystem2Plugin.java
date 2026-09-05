@@ -90,7 +90,12 @@ public final class CatSystem2Plugin implements EnginePlugin {
             source = new Rect(0, 0, width, height);
             title = nativeTitle(engine);
             setBackgroundColor(Color.BLACK);
-            restore();
+            if (!restore()) {
+                // Without this the first screen is the empty one before the
+                // script has said anything, and the game looks like it did not
+                // start until the reader taps. It should open on its first line.
+                nativeAdvance(engine);
+            }
             draw();
         }
 
@@ -135,10 +140,11 @@ public final class CatSystem2Plugin implements EnginePlugin {
          * the engine replays the script to it with nothing drawn, which rebuilds
          * the backgrounds and characters exactly as the script put them.
          */
-        private void restore() {
+        /** True when a saved position was found and the engine was put back to it. */
+        private boolean restore() {
             try {
                 File file = stateFile();
-                if (!file.isFile() || file.length() > 1024 * 1024) return;
+                if (!file.isFile() || file.length() > 1024 * 1024) return false;
                 byte[] stored = new byte[(int) file.length()];
                 try (java.io.FileInputStream input = new java.io.FileInputStream(file)) {
                     int read = 0;
@@ -152,9 +158,12 @@ public final class CatSystem2Plugin implements EnginePlugin {
                     java.nio.charset.StandardCharsets.UTF_8));
                 String script = json.optString("script", "");
                 int cursor = json.optInt("cursor", 0);
-                if (!script.isEmpty() && cursor > 0) nativeSeek(engine, script, cursor);
+                if (script.isEmpty() || cursor <= 0) return false;
+                nativeSeek(engine, script, cursor);
+                return true;
             } catch (Exception error) {
                 log(Log.WARN, "Ignoring invalid save state", error);
+                return false;
             }
         }
 
