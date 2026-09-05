@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install SDL2 and zlib
+      - name: Install what the desktop frontend needs
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev zlib1g-dev
+          sudo apt-get install -y libsdl2-dev zlib1g-dev
       - name: Build
         run: make
       - name: The binary runs and says what it takes

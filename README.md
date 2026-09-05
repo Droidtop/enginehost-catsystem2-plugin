@@ -13,7 +13,9 @@ system of the game's own yet, and no sound.
 
 ## Building and running
 
-Needs gcc, SDL2, SDL2_ttf and zlib.
+Needs gcc, zlib, and SDL2 for the window. The engine itself needs only
+zlib: SDL2 is used by `src/main.c` alone, and the Android wrapper compiles
+everything except that file and links no SDL at all.
 
     make
     ./bin/catsystem2 "/path/to/a/game" --steps 2 --shot frame.png
@@ -25,9 +27,10 @@ of the game's entry point, and `--list <archive>` prints an archive's contents.
 
 ## Layout
 
-    src/      the engine. No Android, no Java, no frontend beyond SDL2.
-    tools/    generators for the data tables the engine carries.
-    makefile  the desktop build.
+    src/          the engine, and src/main.c the desktop frontend.
+    third_party/  stb_truetype.h, the glyph rasteriser, vendored.
+    tools/        generators for the data tables the engine carries.
+    makefile      the desktop build.
 
 The Android plugin is a separate branch that compiles these same sources and
 adds nothing to them; see the enginehost plugin repository's `plugin-core`.

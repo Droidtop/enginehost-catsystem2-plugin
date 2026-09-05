@@ -5,8 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <SDL_ttf.h>
-
+#include "font.h"
 #include "hg3.h"
 
 #define CACHE_SIZE 12
@@ -25,8 +24,8 @@ struct cs2_render {
     uint32_t *canvas;
     cached cache[CACHE_SIZE];
     unsigned long clock;
-    TTF_Font *font;
-    TTF_Font *small_font;
+    cs2_font *font;
+    cs2_font *small_font;
 };
 
 /* The game's own font, whichever face it ships beside its archives. */
@@ -36,23 +35,24 @@ static char *find_font(const char *root) {
     char best[256] = "";
     for (struct dirent *item; (item = readdir(directory)) != NULL; ) {
         size_t length = strlen(item->d_name);
-        if (length < 5) continue;
+        if (length < 5 || length >= sizeof best) continue;
         const char *suffix = item->d_name + length - 4;
         if (!cs2_ieq(suffix, ".ttf") && !cs2_ieq(suffix, ".otf") && !cs2_ieq(suffix, ".ttc")) continue;
         if (best[0] == '\0' || strcmp(item->d_name, best) < 0) {
-            snprintf(best, sizeof best, "%s", item->d_name);
+            memcpy(best, item->d_name, length + 1);
         }
     }
     closedir(directory);
     if (best[0] == '\0') return NULL;
-    char *path = malloc(strlen(root) + strlen(best) + 2);
+    size_t size = strlen(root) + strlen(best) + 2;
+    char *path = malloc(size);
     if (path == NULL) return NULL;
-    sprintf(path, "%s/%s", root, best);
+    snprintf(path, size, "%s/%s", root, best);
     return path;
 }
 
 cs2_render *cs2_render_new(cs2_files *files, int width, int height) {
-    if (width <= 0 || height <= 0) {
+    if (width <= 0 || height <= 0 || width > 8192 || height > 8192) {
         cs2_set_error("cannot draw a %dx%d screen", width, height);
         return NULL;
     }
@@ -70,16 +70,14 @@ cs2_render *cs2_render_new(cs2_files *files, int width, int height) {
         cs2_set_error("out of memory");
         return NULL;
     }
-    if (TTF_WasInit() || TTF_Init() == 0) {
-        char *font = find_font(cs2_files_root(files));
-        if (font != NULL) {
-            render->font = TTF_OpenFont(font, 30);
-            render->small_font = TTF_OpenFont(font, 19);
-            if (render->font == NULL) cs2_log("could not open the game's font %s", font);
-            free(font);
-        } else {
-            cs2_log("the game ships no font beside its archives; no text will be drawn");
-        }
+    char *path = find_font(cs2_files_root(files));
+    if (path == NULL) {
+        cs2_log("the game ships no font beside its archives; no text will be drawn");
+    } else {
+        render->font = cs2_font_open(path, 30);
+        render->small_font = cs2_font_open(path, 19);
+        if (render->font == NULL) cs2_log("could not read the game's font %s", path);
+        free(path);
     }
     return render;
 }
@@ -87,8 +85,8 @@ cs2_render *cs2_render_new(cs2_files *files, int width, int height) {
 void cs2_render_free(cs2_render *render) {
     if (render == NULL) return;
     for (int i = 0; i < CACHE_SIZE; i++) cs2_hg3_frame_free(&render->cache[i].frame);
-    if (render->font != NULL) TTF_CloseFont(render->font);
-    if (render->small_font != NULL) TTF_CloseFont(render->small_font);
+    cs2_font_free(render->font);
+    cs2_font_free(render->small_font);
     free(render->canvas);
     free(render);
 }
@@ -117,7 +115,8 @@ static void fill(cs2_render *render, int x, int y, int width, int height, uint32
         if (row < 0 || row >= render->height) continue;
         for (int column = x; column < x + width; column++) {
             if (column < 0 || column >= render->width) continue;
-            blend(&render->canvas[(size_t) row * render->width + column], colour | 0xff000000u, alpha);
+            blend(&render->canvas[(size_t) row * render->width + column],
+                  colour | 0xff000000u, alpha);
         }
     }
 }
@@ -175,34 +174,9 @@ static void draw_image(cs2_render *render, const cs2_hg3_frame *frame, int x, in
     }
 }
 
-/* One line of text, blitted from an SDL surface into the canvas. */
-static int draw_line(cs2_render *render, TTF_Font *font, const char *line,
+static int draw_line(cs2_render *render, const cs2_font *font, const char *line,
                      int x, int y, uint32_t colour) {
-    if (font == NULL || line == NULL || line[0] == '\0') {
-        return font == NULL ? 0 : TTF_FontHeight(font);
-    }
-    SDL_Color white = {
-        (Uint8) (colour >> 16), (Uint8) (colour >> 8), (Uint8) colour, 255
-    };
-    SDL_Surface *surface = TTF_RenderUTF8_Blended(font, line, white);
-    if (surface == NULL) return TTF_FontHeight(font);
-    SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_ARGB8888, 0);
-    SDL_FreeSurface(surface);
-    if (rgba == NULL) return TTF_FontHeight(font);
-    for (int row = 0; row < rgba->h; row++) {
-        int destination_row = y + row;
-        if (destination_row < 0 || destination_row >= render->height) continue;
-        const uint32_t *source = (const uint32_t *) ((const uint8_t *) rgba->pixels + (size_t) row * rgba->pitch);
-        for (int column = 0; column < rgba->w; column++) {
-            int destination_column = x + column;
-            if (destination_column < 0 || destination_column >= render->width) continue;
-            blend(&render->canvas[(size_t) destination_row * render->width + destination_column],
-                  source[column], 255);
-        }
-    }
-    int height = rgba->h;
-    SDL_FreeSurface(rgba);
-    return height;
+    return cs2_font_draw(font, render->canvas, render->width, render->height, x, y, line, colour);
 }
 
 /* Breaks a line at spaces so it fits the width the message box allows. */
@@ -217,9 +191,7 @@ static void draw_wrapped(cs2_render *render, const char *text, int x, int *y, in
         while (text[end] != '\0' && text[end] != '\n' && length + 1 < sizeof line) {
             line[length++] = text[end];
             line[length] = '\0';
-            int measured = 0;
-            TTF_SizeUTF8(render->font, line, &measured, NULL);
-            if (measured > width && last_space > 0) {
+            if (cs2_font_measure(render->font, line) > width && last_space > 0) {
                 length = last_space;
                 line[length] = '\0';
                 end = at + last_space;
@@ -228,7 +200,7 @@ static void draw_wrapped(cs2_render *render, const char *text, int x, int *y, in
             if (text[end] == ' ') last_space = length;
             end++;
         }
-        *y += draw_line(render, render->font, line, x, *y, 0xffffffffu) + 6;
+        *y += draw_line(render, render->font, line, x, *y, 0xffffffffu) + 4;
         at = end;
         while (text[at] == ' ' || text[at] == '\n') at++;
     }
@@ -259,7 +231,7 @@ const uint32_t *cs2_render_frame(cs2_render *render, const cs2_scene *scene, con
              render->height - box_top - margin / 4, 0xcc000c10u);
         int y = box_top + margin / 2;
         if (speaker[0] != '\0') {
-            y += draw_line(render, render->font, speaker, margin, y, 0xff80cbc4u) + 6;
+            y += draw_line(render, render->font, speaker, margin, y, 0xff80cbc4u) + 4;
         }
         draw_wrapped(render, text, margin, &y, render->width - margin * 2);
     }

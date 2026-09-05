@@ -18,8 +18,11 @@ OBJECTS  := $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(SOURCES))
 DEPS     := $(OBJECTS:.o=.d)
 
 CC       ?= gcc
-CFLAGS   := -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -O2 -g -MMD -MP $(shell sdl2-config --cflags)
-LDFLAGS  := $(shell sdl2-config --libs) -lSDL2_ttf -lz -lm
+# The engine itself needs nothing but zlib. SDL2 is the desktop frontend's
+# window, used by src/main.c alone; the Android wrapper compiles everything
+# except that file and links no SDL at all.
+CFLAGS   := -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -O2 -g -MMD -MP -Ithird_party $(shell sdl2-config --cflags)
+LDFLAGS  := $(shell sdl2-config --libs) -lz -lm
 
 .PHONY: all clean check
 
