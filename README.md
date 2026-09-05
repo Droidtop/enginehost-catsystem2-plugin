@@ -1,17 +1,14 @@
-# Experimental CatSystem2 CST plugin
+# CatSystem2 plugin for Enginehost
 
-This first native Android interpreter reads `CatScene` CST scripts in place,
-validates their tables and decompression bounds, decodes Shift-JIS names and
-dialogue, and implements input/page waits. Unsupported CatSystem2 commands are
-currently skipped, so graphics, audio, branching, archive access, and FES UI
-scripts remain future plugin work.
+This branch is the wrapper, and only the wrapper. The engine it wraps is on
+`main`: C, with no Android in it, buildable and runnable on Linux on its own.
 
-The format implementation follows the publicly documented CatScene structure
-and line types from the MIT-licensed
-[TriggersTools.CatSystem2](https://github.com/trigger-segfault/TriggersTools.CatSystem2)
-research project. No code from the proprietary CatSystem2 runtime is included.
-The Enginehost implementation is MIT-licensed and currently requires
-already-extracted `.cst` files and never extracts or copies game content.
+What is here is what Android needs and the engine must not know about: the
+plugin class Enginehost loads, the JNI bridge that hands it the buffer of pixels
+the engine draws into, the CMake file that compiles the engine's own sources,
+the capabilities the plugin advertises, and the bundle metadata and keys it is
+signed with. Nothing here reads a game file or draws a pixel.
 
-Capability `cst` / `2.0` is experimental and intentionally narrow. Android
-builds run only in CI.
+Nothing on this branch builds by itself, deliberately: there is no engine here
+to compile. A release line - `plugin/<version>` - is this branch merged onto
+the engine, and that is what CI builds and publishes.

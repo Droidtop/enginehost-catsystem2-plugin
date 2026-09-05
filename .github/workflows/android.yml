@@ -1,8 +1,11 @@
 name: Build Enginehost bundle
 
+# Only the release lines build. plugin-core is the wrapper alone: it carries no
+# engine, so there is nothing there to compile, and a release branch is that
+# wrapper merged onto the engine on main.
 on:
   push:
-    branches: [plugin-core, "plugin/**"]
+    branches: ["plugin/**"]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -64,6 +67,12 @@ jobs:
           mkdir -p build/payload build/output
           unzip -p app/build/outputs/aar/app-release.aar classes.jar > build/classes.jar
           "$ANDROID_HOME/build-tools/36.0.0/d8" --release --min-api 26 --output build/payload build/classes.jar
+          # The engine itself. Enginehost puts lib/<abi> from the bundle on the
+          # runtime class loader's library path, so this is all it takes for
+          # System.loadLibrary to find it.
+          mkdir -p build/payload/lib/arm64-v8a
+          unzip -j app/build/outputs/aar/app-release.aar 'jni/arm64-v8a/*.so' -d build/payload/lib/arm64-v8a
+          test -f build/payload/lib/arm64-v8a/libcatsystem2.so
           cp LICENSE THIRD_PARTY.md build/payload/
           printf '%s' "$ENGINEHOST_SIGNING_KEY_PEM" > build/signing-key.pem
           python3 enginehost-tooling/scripts/build-engine-bundle.py \

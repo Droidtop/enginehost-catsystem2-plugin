@@ -19,10 +19,11 @@
     }
   ],
   "source": {
-    "upstream": "https://github.com/trigger-segfault/TriggersTools.CatSystem2",
-    "revision": "format-research"
+    "upstream": "https://github.com/droidtop/enginehost-catsystem2-plugin",
+    "revision": "main"
   },
   "licenses": [
-    "MIT"
+    "MIT",
+    "Public Domain (stb_truetype)"
   ]
 }
