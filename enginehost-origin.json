@@ -1,0 +1,13 @@
+{
+  "description": "Enginehost plugin implementation repository for CatSystem2",
+  "engine": "catsystem2",
+  "engineContexts": [
+    "cst"
+  ],
+  "formatVersion": 1,
+  "implementation": {
+    "id": "enginehost-native",
+    "name": "Enginehost native"
+  },
+  "origin": "https://github.com/droidtop/enginehost-catsystem2-plugin"
+}

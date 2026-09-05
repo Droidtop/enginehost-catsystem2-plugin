@@ -1,0 +1,223 @@
+name: Build Enginehost bundle
+
+# Only the release lines build. plugin-core is the wrapper alone: it carries no
+# engine, so there is nothing there to compile, and a release branch is that
+# wrapper merged onto the engine on main.
+on:
+  push:
+    branches: ["plugin/**"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: >-
+          Promote this build to a GitHub Release on the chosen channel. Stable is
+          for a bundle that has been used with real games on hardware; testing
+          for one that runs games but has not been lived with. Every push
+          already publishes to the unstable channel by itself.
+        type: boolean
+        default: false
+      channel:
+        description: "Release channel for a promoted build"
+        type: choice
+        options: [stable, testing]
+        default: stable
+      tag:
+        description: "Release tag (default: derived from the bundle id; testing adds -testing)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# One agent push supersedes the previous one instead of racing it. Before
+# this, every push queued another full build and nothing cancelled the run
+# it had just obsoleted, so a five-push fix session burned five builds and
+# could email five failures for one problem. Keyed on the ref, so branches
+# and PRs never cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Droidtop/enginehost
+          ref: codex/engine-bundles
+          path: enginehost-tooling
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+      - name: Build wrapper library
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+      - name: Build signed Enginehost bundle
+        env:
+          ENGINEHOST_SIGNING_KEY_PEM: ${{ secrets.ENGINEHOST_SIGNING_KEY_PEM }}
+        run: |
+          test -n "$ENGINEHOST_SIGNING_KEY_PEM"
+          mkdir -p build/payload build/output
+          unzip -p app/build/outputs/aar/app-release.aar classes.jar > build/classes.jar
+          "$ANDROID_HOME/build-tools/36.0.0/d8" --release --min-api 26 --output build/payload build/classes.jar
+          # The engine itself. Enginehost puts lib/<abi> from the bundle on the
+          # runtime class loader's library path, so this is all it takes for
+          # System.loadLibrary to find it.
+          mkdir -p build/payload/lib/arm64-v8a
+          unzip -j app/build/outputs/aar/app-release.aar 'jni/arm64-v8a/*.so' -d build/payload/lib/arm64-v8a
+          test -f build/payload/lib/arm64-v8a/libcatsystem2.so
+          cp LICENSE THIRD_PARTY.md build/payload/
+          printf '%s' "$ENGINEHOST_SIGNING_KEY_PEM" > build/signing-key.pem
+          python3 enginehost-tooling/scripts/build-engine-bundle.py \
+            --metadata enginehost/bundle-metadata.json --payload build/payload \
+            --private-key build/signing-key.pem \
+            --repository-key-document enginehost-public-key.json \
+            --output build/output/dev.enginehost.catsystem2.cst.v1.enginehost.tar.xz \
+            --release-envelope build/output/enginehost-release.json \
+            --public-key-document build/output/enginehost-public-key.json
+          cmp enginehost-public-key.json build/output/enginehost-public-key.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enginehost-catsystem2-cst-v1
+          path: build/output/*
+
+  publish:
+    # Promotion is deliberate: a manual dispatch names the channel. Stable
+    # means used with real games on hardware; testing means it runs games
+    # but has not been lived with. Enginehost offers each person the channel
+    # they chose in Settings and every steadier one.
+    needs: bundle
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+      - name: Publish the signed bundle on the chosen channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # No artifact at all (a branch whose build makes no bundle) means no
+          # release directory either; that is "nothing to publish", not an error.
+          mkdir -p release
+          bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
+          if [ -z "$bundle" ]; then
+            echo "This branch's build produced no signed bundle; nothing to publish."
+            exit 0
+          fi
+          id="$(basename "$bundle" .enginehost.tar.xz)"
+          envelope="$(find release -name 'enginehost-release.json' -print -quit)"
+          keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
+          test -f "$envelope"
+          # The envelope names its channel; the app filters on it. The signed
+          # manifest inside is untouched.
+          python3 - "$envelope" "$CHANNEL" <<'PY'
+          import json, sys
+          path, channel = sys.argv[1], sys.argv[2]
+          data = json.load(open(path))
+          data["channel"] = channel
+          json.dump(data, open(path, "w"), indent=2)
+          PY
+          tag="$REQUESTED_TAG"
+          if [ -z "$tag" ]; then
+            tag="$(printf '%s' "$id" | sed 's/^dev\.enginehost\.//; s/\./-/g')"
+          fi
+          case "$CHANNEL" in
+            stable) prerelease="" ;;
+            testing) tag="$tag-testing"; prerelease="--prerelease" ;;
+            unstable) tag="$tag-unstable"; prerelease="--prerelease" ;;
+            *) echo "unknown channel $CHANNEL" >&2; exit 1 ;;
+          esac
+          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`${{ github.ref_name }}\` at \`${{ github.sha }}\` (build ${{ github.run_number }}). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
+          if [ "$CHANNEL" = unstable ]; then
+            # Rolling: the newest green build of the line is the whole release.
+            gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --title "$id (unstable)" $prerelease --notes "$notes"
+          elif gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --clobber
+            gh release edit "$tag" --repo "${{ github.repository }}" --notes "$notes"
+          else
+            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --title "$id ($CHANNEL)" $prerelease --notes "$notes"
+          fi
+
+  unstable:
+    # Every green push that produced a signed bundle is published as-is on
+    # the unstable channel, replacing the previous one, so a person who opted
+    # into unstable in Enginehost sees each build the moment CI is done with
+    # it. Branches whose build makes no bundle publish nothing.
+    needs: bundle
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+      - name: Publish the signed bundle on the unstable channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: unstable
+          REQUESTED_TAG: 
+        run: |
+          set -euo pipefail
+          # No artifact at all (a branch whose build makes no bundle) means no
+          # release directory either; that is "nothing to publish", not an error.
+          mkdir -p release
+          bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
+          if [ -z "$bundle" ]; then
+            echo "This branch's build produced no signed bundle; nothing to publish."
+            exit 0
+          fi
+          id="$(basename "$bundle" .enginehost.tar.xz)"
+          envelope="$(find release -name 'enginehost-release.json' -print -quit)"
+          keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
+          test -f "$envelope"
+          # The envelope names its channel; the app filters on it. The signed
+          # manifest inside is untouched.
+          python3 - "$envelope" "$CHANNEL" <<'PY'
+          import json, sys
+          path, channel = sys.argv[1], sys.argv[2]
+          data = json.load(open(path))
+          data["channel"] = channel
+          json.dump(data, open(path, "w"), indent=2)
+          PY
+          tag="$REQUESTED_TAG"
+          if [ -z "$tag" ]; then
+            tag="$(printf '%s' "$id" | sed 's/^dev\.enginehost\.//; s/\./-/g')"
+          fi
+          case "$CHANNEL" in
+            stable) prerelease="" ;;
+            testing) tag="$tag-testing"; prerelease="--prerelease" ;;
+            unstable) tag="$tag-unstable"; prerelease="--prerelease" ;;
+            *) echo "unknown channel $CHANNEL" >&2; exit 1 ;;
+          esac
+          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`${{ github.ref_name }}\` at \`${{ github.sha }}\` (build ${{ github.run_number }}). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
+          if [ "$CHANNEL" = unstable ]; then
+            # Rolling: the newest green build of the line is the whole release.
+            gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --title "$id (unstable)" $prerelease --notes "$notes"
+          elif gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --clobber
+            gh release edit "$tag" --repo "${{ github.repository }}" --notes "$notes"
+          else
+            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
+              --repo "${{ github.repository }}" --title "$id ($CHANNEL)" $prerelease --notes "$notes"
+          fi

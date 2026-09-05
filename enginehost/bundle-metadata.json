@@ -1,0 +1,29 @@
+{
+  "bundleId": "dev.enginehost.catsystem2.cst.v1",
+  "engine": "catsystem2",
+  "pluginVersion": "0.1",
+  "apiVersion": 1,
+  "entrypoint": "dev.enginehost.plugin.catsystem2.CatSystem2Plugin",
+  "origin": "https://github.com/droidtop/enginehost-catsystem2-plugin",
+  "dexFiles": [
+    "classes.dex"
+  ],
+  "capabilities": [
+    {
+      "id": "catsystem2-cst-experimental-v1",
+      "engineContext": "cst",
+      "runtimeVersion": "2.0",
+      "supportedSeries": [
+        "2"
+      ]
+    }
+  ],
+  "source": {
+    "upstream": "https://github.com/droidtop/enginehost-catsystem2-plugin",
+    "revision": "main"
+  },
+  "licenses": [
+    "MIT",
+    "Public Domain (stb_truetype)"
+  ]
+}

@@ -41,3 +41,10 @@ The formats were worked out with the help of the public documentation in
 [TriggersTools.CatSystem2](https://github.com/trigger-segfault/TriggersTools.CatSystem2)
 (MIT). No source code from that project, and none from the proprietary
 CatSystem2 runtime, is included here. See THIRD_PARTY.md.
+
+## This branch
+
+This is a release line: the engine on `main` with the Enginehost wrapper from
+`plugin-core` merged onto it. The wrapper adds `app/`, which compiles these same
+sources for Android and shows what they draw; it adds nothing to the engine and
+repeats none of it. CI builds and signs the bundle from here.
