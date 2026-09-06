@@ -6,8 +6,16 @@
  * back. Everything it calls lives in ../../../../src, which is also what the
  * desktop runner builds, so there is one engine and no second implementation of
  * anything.
+ *
+ * What runs is the game itself, from its own boot script: kcs.int/main.kcs
+ * builds the screen and starts the plane holding the layout "flow", and flow.fes
+ * is Grisaia's front end - the logo, the title screen, and the new game that
+ * starts the system script. So the console gets the game's own opening rather
+ * than a scene script picked for it, and the frame loop is the game's own sixty
+ * a second rather than one picture per tap.
  */
 #include <jni.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,22 +24,26 @@
 
 #include "audio.h"
 #include "files.h"
+#include "kcs.h"
 #include "render.h"
 #include "scene.h"
 #include "startup.h"
-#include "text.h"
+#include "system.h"
 
 #define TAG "catsystem2"
+#define INSTRUCTION_BUDGET 2000000
 
 typedef struct {
     cs2_files *files;
     cs2_startup *startup;
-    cs2_text *text;
-    cs2_scene *scene;
+    cs2_system *system;
+    cs2_kcs *boot;              /* the game's own boot script */
     cs2_render *render;
     cs2_audio *audio;
     AAudioStream *sound;
-    char note[256];
+    uint32_t *canvas;
+    int width, height;
+    int running;                /* the boot script has not ended or faulted */
 } session;
 
 static session *from_handle(jlong handle) {
@@ -45,22 +57,6 @@ static jstring to_java(JNIEnv *env, const char *text) {
 static int ends_with_cst(const char *name) {
     size_t length = strlen(name);
     return length > 4 && cs2_ieq(name + length - 4, ".cst");
-}
-
-/* The first script of scene.int, in name order, for a game we cannot boot. */
-static int first_scene_script(cs2_files *files, char *out, size_t out_size) {
-    cs2_kif *archive = cs2_files_archive(files, "scene.int");
-    if (archive == NULL) return -1;
-    const char *best = NULL;
-    for (size_t i = 0; i < cs2_kif_count(archive); i++) {
-        const char *name = cs2_kif_name(archive, i);
-        size_t length = strlen(name);
-        if (length < 5 || !cs2_ieq(name + length - 4, ".cst")) continue;
-        if (best == NULL || strcmp(name, best) < 0) best = name;
-    }
-    if (best == NULL) return -1;
-    snprintf(out, out_size, "scene.int/%s", best);
-    return 0;
 }
 
 /*
@@ -101,7 +97,7 @@ static void open_sound(session *state) {
         AAudioStream_close(stream);
         return;
     }
-    cs2_scene_set_audio(state->scene, state->audio);
+    cs2_system_set_audio(state->system, state->audio);
     state->sound = stream;
     AAudioStream_requestStart(stream);
     __android_log_print(ANDROID_LOG_INFO, TAG, "sound at %d Hz",
@@ -114,6 +110,7 @@ static void close_sound(session *state) {
         AAudioStream_close(state->sound);
         state->sound = NULL;
     }
+    cs2_system_set_audio(state->system, NULL);
     cs2_audio_free(state->audio);
     state->audio = NULL;
 }
@@ -121,12 +118,23 @@ static void close_sound(session *state) {
 static void close_session(session *state) {
     if (state == NULL) return;
     close_sound(state);
+    if (state->boot != NULL) {
+        /* The block of persistent variables belongs to the engine's system
+           side; take it back before the script frees what it was lent. */
+        cs2_kcs_set_variables(state->boot, NULL, 0);
+        cs2_kcs_free(state->boot);
+    }
     cs2_render_free(state->render);
-    cs2_scene_free(state->scene);
-    cs2_text_free(state->text);
+    cs2_system_free(state->system);
     cs2_startup_free(state->startup);
     cs2_files_close(state->files);
+    free(state->canvas);
     free(state);
+}
+
+static int screen_size(const cs2_startup *startup, const char *key, int fallback) {
+    int value = cs2_startup_number(startup, key, fallback);
+    return value > 0 ? value : fallback;
 }
 
 JNIEXPORT jlong JNICALL
@@ -161,42 +169,37 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
         state->startup = cs2_startup_parse(document.data, document.size);
         cs2_bytes_free(&document);
     }
-    state->text = cs2_text_from(state->startup);
-    state->scene = cs2_scene_new(state->files, state->text);
-    if (state->text == NULL || state->scene == NULL) {
-        cs2_set_error("out of memory");
+
+    /*
+     * The boot script startup.xml names. A game whose entry point is a scene
+     * script rather than a system script is not one this plugin runs: the front
+     * end is what the console needs, and it is the system script that has it.
+     */
+    char path[512];
+    const char *entry = cs2_startup_value(state->startup, "SCRIPT/start");
+    if (wanted != NULL && wanted[0] != '\0' && !ends_with_cst(wanted)) entry = wanted;
+    if (entry == NULL || ends_with_cst(entry)) entry = "kcs.int/main.kcs";
+    if (strchr(entry, '/') != NULL) snprintf(path, sizeof path, "%s", entry);
+    else snprintf(path, sizeof path, "kcs.int/%s", entry);
+
+    state->width = screen_size(state->startup, "SCREEN/width", 1024);
+    state->height = screen_size(state->startup, "SCREEN/height", 576);
+    state->canvas = calloc((size_t) state->width * state->height, sizeof *state->canvas);
+    state->boot = cs2_kcs_load(state->files, path);
+    state->system = cs2_system_new(state->files, state->width, state->height);
+    state->render = cs2_render_new(state->files, state->width, state->height);
+    if (state->canvas == NULL || state->boot == NULL || state->system == NULL
+        || state->render == NULL) {
         goto failed;
     }
+    uint32_t variable_size = 0;
+    void *variables = cs2_system_variables(state->system, &variable_size);
+    cs2_kcs_set_variables(state->boot, variables, variable_size);
+    cs2_kcs_set_gcall(state->boot, cs2_system_gcall, state->system);
+    state->running = 1;
+    __android_log_print(ANDROID_LOG_INFO, TAG, "the game boots into %s", path);
 
-    char script[512];
-    const char *start = cs2_startup_value(state->startup, "SCRIPT/start");
-    if (wanted != NULL && wanted[0] != '\0') {
-        if (strchr(wanted, '/') != NULL) snprintf(script, sizeof script, "%s", wanted);
-        else snprintf(script, sizeof script, "scene.int/%s", wanted);
-    } else if (start != NULL && ends_with_cst(start)) {
-        snprintf(script, sizeof script, "%s", start);
-    } else if (first_scene_script(state->files, script, sizeof script) == 0) {
-        if (start == NULL) {
-            snprintf(state->note, sizeof state->note, "startup.xml names no entry point");
-        } else {
-            snprintf(state->note, sizeof state->note,
-                     "the game boots into %s, which this plugin cannot run yet", start);
-        }
-    } else {
-        cs2_set_error("this game holds no scene script to play");
-        goto failed;
-    }
-    if (cs2_scene_play(state->scene, script) != 0) goto failed;
-    __android_log_print(ANDROID_LOG_INFO, TAG, "playing %s (%zu lines)%s%s",
-        cs2_scene_path(state->scene), cs2_scene_line_count(state->scene),
-        state->note[0] == '\0' ? "" : "; ", state->note);
-
-    state->render = cs2_render_new(state->files,
-        cs2_startup_number(state->startup, "SCREEN/width", 1024),
-        cs2_startup_number(state->startup, "SCREEN/height", 576));
-    if (state->render == NULL) goto failed;
     open_sound(state);
-
     (*env)->ReleaseStringUTFChars(env, game_path, root);
     if (wanted != NULL) (*env)->ReleaseStringUTFChars(env, wanted_script, wanted);
     return (jlong) (intptr_t) state;
@@ -240,7 +243,7 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeWidth(
         JNIEnv *env, jclass type, jlong handle) {
     (void) env;
     (void) type;
-    return cs2_render_width(from_handle(handle)->render);
+    return (jint) from_handle(handle)->width;
 }
 
 JNIEXPORT jint JNICALL
@@ -248,93 +251,65 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeHeight(
         JNIEnv *env, jclass type, jlong handle) {
     (void) env;
     (void) type;
-    return cs2_render_height(from_handle(handle)->render);
+    return (jint) from_handle(handle)->height;
 }
 
+/*
+ * One frame of the game: the boot script, then the engine's own side - the
+ * layout that is the front end, and the system script the layout has started.
+ * Answers false once the game has ended or the script has faulted.
+ */
+JNIEXPORT jboolean JNICALL
+Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeStep(
+        JNIEnv *env, jclass type, jlong handle) {
+    (void) env;
+    (void) type;
+    session *state = from_handle(handle);
+    if (state == NULL || !state->running) return JNI_FALSE;
+    int running = cs2_kcs_frame(state->boot, INSTRUCTION_BUDGET);
+    if (running < 0) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
+        state->running = 0;
+        return JNI_FALSE;
+    }
+    cs2_system_frame(state->system);
+    if (running == 0 || cs2_system_finished(state->system)) {
+        __android_log_print(ANDROID_LOG_INFO, TAG, "the game has ended");
+        state->running = 0;
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+/*
+ * The picture: the scenario the front end has on the screen, with the planes
+ * and their layouts over it. That is the order the game builds its screen -
+ * a scene script underneath, the front end's own furniture above it.
+ */
+JNIEXPORT void JNICALL
+Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeFrame(
+        JNIEnv *env, jclass type, jlong handle, jintArray pixels) {
+    (void) type;
+    session *state = from_handle(handle);
+    if (state == NULL) return;
+    size_t count = (size_t) state->width * state->height;
+    const cs2_scene *scenario = cs2_system_scenario(state->system);
+    if (scenario != NULL) {
+        const uint32_t *drawn = cs2_render_frame(state->render, scenario, NULL);
+        memcpy(state->canvas, drawn, count * sizeof *state->canvas);
+    } else {
+        for (size_t i = 0; i < count; i++) state->canvas[i] = 0xff000000u;
+    }
+    cs2_system_draw(state->system, state->canvas, state->width, state->height);
+    (*env)->SetIntArrayRegion(env, pixels, 0, (jsize) count, (const jint *) state->canvas);
+}
+
+/* The reader asked for the next thing: a tap, or the confirm button. */
 JNIEXPORT void JNICALL
 Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeAdvance(
         JNIEnv *env, jclass type, jlong handle) {
     (void) env;
     (void) type;
     session *state = from_handle(handle);
-    cs2_scene_advance(state->scene);
-    const char *skipped = cs2_scene_take_skipped(state->scene);
-    if (skipped[0] != '\0') {
-        __android_log_print(ANDROID_LOG_INFO, TAG, "commands not carried out yet: %s", skipped);
-    }
-}
-
-JNIEXPORT void JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeSeek(
-        JNIEnv *env, jclass type, jlong handle, jstring script, jint cursor) {
-    (void) type;
-    session *state = from_handle(handle);
-    if (script != NULL) {
-        const char *path = (*env)->GetStringUTFChars(env, script, NULL);
-        if (path[0] != '\0' && strcmp(path, cs2_scene_path(state->scene)) != 0) {
-            cs2_scene_play(state->scene, path);
-        }
-        (*env)->ReleaseStringUTFChars(env, script, path);
-    }
-    cs2_scene_seek(state->scene, (size_t) (cursor < 0 ? 0 : cursor));
-}
-
-/* Fills a width * height int array with the frame, in Android's ARGB_8888. */
-JNIEXPORT void JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeFrame(
-        JNIEnv *env, jclass type, jlong handle, jintArray pixels, jstring status) {
-    (void) type;
-    session *state = from_handle(handle);
-    const char *line = status == NULL ? NULL : (*env)->GetStringUTFChars(env, status, NULL);
-    const uint32_t *canvas = cs2_render_frame(state->render, state->scene, line);
-    if (line != NULL) (*env)->ReleaseStringUTFChars(env, status, line);
-
-    jsize wanted = (jsize) (cs2_render_width(state->render) * cs2_render_height(state->render));
-    if ((*env)->GetArrayLength(env, pixels) < wanted) return;
-    (*env)->SetIntArrayRegion(env, pixels, 0, wanted, (const jint *) canvas);
-}
-
-JNIEXPORT jstring JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeText(
-        JNIEnv *env, jclass type, jlong handle) {
-    (void) type;
-    return to_java(env, cs2_scene_text(from_handle(handle)->scene));
-}
-
-JNIEXPORT jstring JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativePath(
-        JNIEnv *env, jclass type, jlong handle) {
-    (void) type;
-    return to_java(env, cs2_scene_path(from_handle(handle)->scene));
-}
-
-JNIEXPORT jstring JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeNote(
-        JNIEnv *env, jclass type, jlong handle) {
-    (void) type;
-    return to_java(env, from_handle(handle)->note);
-}
-
-JNIEXPORT jstring JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeTitle(
-        JNIEnv *env, jclass type, jlong handle) {
-    (void) type;
-    const char *title = cs2_startup_value(from_handle(handle)->startup, "APP/title");
-    return to_java(env, title == NULL ? "CatSystem2" : title);
-}
-
-JNIEXPORT jint JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeCursor(
-        JNIEnv *env, jclass type, jlong handle) {
-    (void) env;
-    (void) type;
-    return (jint) cs2_scene_cursor(from_handle(handle)->scene);
-}
-
-JNIEXPORT jint JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeLineCount(
-        JNIEnv *env, jclass type, jlong handle) {
-    (void) env;
-    (void) type;
-    return (jint) cs2_scene_line_count(from_handle(handle)->scene);
+    if (state != NULL) cs2_system_event(state->system, 1);
 }

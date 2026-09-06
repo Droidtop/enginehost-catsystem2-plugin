@@ -6,25 +6,25 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
-import android.util.Log;
+import android.view.Choreographer;
 import android.view.MotionEvent;
 import android.view.View;
 import dev.enginehost.api.EngineControllerEvent;
 import dev.enginehost.api.EnginePlugin;
 import dev.enginehost.api.EnginePluginSession;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import org.json.JSONObject;
 
 /**
  * The Android wrapper around the CatSystem2 engine.
  *
  * <p>The engine is the C in this repository's {@code src}, the same code the
- * desktop runner builds. It reads the game's archives, plays a scene script and
- * draws the result into a buffer of pixels; everything here does is hand it the
- * game folder, show that buffer, and pass the reader's taps back. No part of the
- * engine is repeated in Java.
+ * desktop runner builds. It runs the game's own boot script, which puts the
+ * game's own front end on the screen - the logo, the title screen, and the new
+ * game that starts the system script - and draws each frame into a buffer of
+ * pixels. Everything this class does is hand it the game folder, drive its
+ * frames off the display's own clock, show the buffer and pass the reader's
+ * taps back. No part of the engine is repeated in Java, and nothing here
+ * decides what the game shows.
  */
 public final class CatSystem2Plugin implements EnginePlugin {
     static {
@@ -47,15 +47,17 @@ public final class CatSystem2Plugin implements EnginePlugin {
     }
 
     @Override public void onPause() {
+        if (view != null) view.setRunning(false);
         if (engine != 0) nativeSetSounding(engine, false);
     }
 
     @Override public void onResume() {
         if (engine != 0) nativeSetSounding(engine, true);
+        if (view != null) view.setRunning(true);
     }
 
     @Override public void onDestroy() {
-        if (view != null) view.save();
+        if (view != null) view.setRunning(false);
         if (engine != 0) {
             nativeClose(engine);
             engine = 0;
@@ -64,22 +66,22 @@ public final class CatSystem2Plugin implements EnginePlugin {
 
     @Override public boolean onControllerEvent(EngineControllerEvent event) {
         if (event.pressed() && ("confirm".equals(event.action()) || "page_next".equals(event.action()))) {
-            view.advance();
+            nativeAdvance(engine);
             return true;
         }
         return false;
     }
 
-    private void log(int priority, String message, Throwable error) {
-        session.host().log(priority, "catsystem2", message, error);
-    }
-
     /**
-     * Shows the engine's picture. The game is authored for a fixed virtual
-     * screen, so the frame arrives at that size and is scaled to the console's,
-     * centred, with the aspect ratio kept.
+     * Shows the engine's picture, a frame at a time.
+     *
+     * <p>The front end is written in frames - fades, waits, a logo that plays
+     * itself out - so the game is stepped once per display frame rather than
+     * once per tap. The game is authored for a fixed virtual screen, so the
+     * frame arrives at that size and is scaled to the console's, centred, with
+     * the aspect ratio kept.
      */
-    private final class ScreenView extends View {
+    private final class ScreenView extends View implements Choreographer.FrameCallback {
         private final int width;
         private final int height;
         private final int[] pixels;
@@ -87,7 +89,7 @@ public final class CatSystem2Plugin implements EnginePlugin {
         private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
         private final Rect source;
         private final RectF destination = new RectF();
-        private final String title;
+        private boolean running;
 
         ScreenView() {
             super(session.host().context());
@@ -96,33 +98,25 @@ public final class CatSystem2Plugin implements EnginePlugin {
             pixels = new int[width * height];
             frame = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             source = new Rect(0, 0, width, height);
-            title = nativeTitle(engine);
             setBackgroundColor(Color.BLACK);
-            if (!restore()) {
-                // Without this the first screen is the empty one before the
-                // script has said anything, and the game looks like it did not
-                // start until the reader taps. It should open on its first line.
-                nativeAdvance(engine);
-            }
-            draw();
+            setRunning(true);
         }
 
-        void advance() {
-            nativeAdvance(engine);
-            draw();
-            save();
+        void setRunning(boolean wanted) {
+            if (wanted == running) return;
+            running = wanted;
+            if (wanted) Choreographer.getInstance().postFrameCallback(this);
+            else Choreographer.getInstance().removeFrameCallback(this);
         }
 
-        private void draw() {
-            nativeFrame(engine, pixels, status());
+        @Override public void doFrame(long frameTimeNanos) {
+            if (!running || engine == 0) return;
+            boolean alive = nativeStep(engine);
+            nativeFrame(engine, pixels);
             frame.setPixels(pixels, 0, width, 0, 0, width, height);
             invalidate();
-        }
-
-        private String status() {
-            String note = nativeNote(engine);
-            return title + "  -  " + nativePath(engine) + "  " + nativeCursor(engine)
-                + "/" + nativeLineCount(engine) + (note.isEmpty() ? "" : "  (" + note + ")");
+            if (alive) Choreographer.getInstance().postFrameCallback(this);
+            else running = false;
         }
 
         @Override protected void onDraw(Canvas canvas) {
@@ -135,55 +129,8 @@ public final class CatSystem2Plugin implements EnginePlugin {
         }
 
         @Override public boolean onTouchEvent(MotionEvent event) {
-            if (event.getAction() == MotionEvent.ACTION_UP) advance();
+            if (event.getAction() == MotionEvent.ACTION_UP) nativeAdvance(engine);
             return true;
-        }
-
-        private File stateFile() {
-            return new File(session.host().saveDirectory(), "catsystem2-scene-state.json");
-        }
-
-        /**
-         * Puts the reader back where they left off. Only the position is kept;
-         * the engine replays the script to it with nothing drawn, which rebuilds
-         * the backgrounds and characters exactly as the script put them.
-         */
-        /** True when a saved position was found and the engine was put back to it. */
-        private boolean restore() {
-            try {
-                File file = stateFile();
-                if (!file.isFile() || file.length() > 1024 * 1024) return false;
-                byte[] stored = new byte[(int) file.length()];
-                try (java.io.FileInputStream input = new java.io.FileInputStream(file)) {
-                    int read = 0;
-                    while (read < stored.length) {
-                        int count = input.read(stored, read, stored.length - read);
-                        if (count < 0) break;
-                        read += count;
-                    }
-                }
-                JSONObject json = new JSONObject(new String(stored,
-                    java.nio.charset.StandardCharsets.UTF_8));
-                String script = json.optString("script", "");
-                int cursor = json.optInt("cursor", 0);
-                if (script.isEmpty() || cursor <= 0) return false;
-                nativeSeek(engine, script, cursor);
-                return true;
-            } catch (Exception error) {
-                log(Log.WARN, "Ignoring invalid save state", error);
-                return false;
-            }
-        }
-
-        void save() {
-            try (FileOutputStream output = new FileOutputStream(stateFile(), false)) {
-                JSONObject json = new JSONObject()
-                    .put("script", nativePath(engine))
-                    .put("cursor", nativeCursor(engine));
-                output.write(json.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            } catch (Exception error) {
-                log(Log.ERROR, "Could not save state", error);
-            }
         }
     }
 
@@ -193,13 +140,7 @@ public final class CatSystem2Plugin implements EnginePlugin {
     private static native String nativeError();
     private static native int nativeWidth(long engine);
     private static native int nativeHeight(long engine);
+    private static native boolean nativeStep(long engine);
+    private static native void nativeFrame(long engine, int[] pixels);
     private static native void nativeAdvance(long engine);
-    private static native void nativeSeek(long engine, String script, int cursor);
-    private static native void nativeFrame(long engine, int[] pixels, String status);
-    private static native String nativeText(long engine);
-    private static native String nativePath(long engine);
-    private static native String nativeNote(long engine);
-    private static native String nativeTitle(long engine);
-    private static native int nativeCursor(long engine);
-    private static native int nativeLineCount(long engine);
 }
