@@ -559,7 +559,7 @@ cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layou
         layout->objects = calloc(layout->object_count, sizeof *layout->objects);
         if (layout->objects == NULL) {
             cs2_layout_free(layout);
-            cs2_set_error("out of memory for the objects of %s.fes", name);
+            cs2_set_error("out of memory for the objects of %s.fes", cs2_fes_name(layout->fes));
             return NULL;
         }
         for (size_t i = 0; i < layout->object_count; i++) {
@@ -571,10 +571,11 @@ cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layou
     layout->section = cs2_fes_section(layout->fes, "START");
     snprintf(layout->state, sizeof layout->state, "START");
     if (layout->section < 0) {
-        cs2_log("%s.fes has no #START", name);
+        cs2_log("%s.fes has no #START", cs2_fes_name(layout->fes));
         layout->section = 0;
     }
-    cs2_log("the layout %s.fes is running, %zu objects", name, layout->object_count);
+    cs2_log("the layout %s.fes is running, %zu objects", cs2_fes_name(layout->fes),
+            layout->object_count);
     return layout;
 }
 

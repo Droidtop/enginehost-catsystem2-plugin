@@ -16,6 +16,8 @@
 #ifndef CS2_SYSTEM_H
 #define CS2_SYSTEM_H
 
+#include <stddef.h>
+
 #include "files.h"
 #include "kcs.h"
 #include "layout.h"
@@ -65,9 +67,14 @@ void cs2_system_set_boot(cs2_system *system, int type, const char *scenario);
 void cs2_system_set_audio(cs2_system *system, cs2_audio *audio);
 
 /*
- * The layout a started plane is running: the game's own front end, the logo
- * and the title screen and what they lead to. NULL until a plane is started.
+ * The layouts the started planes are running: the game's own front end, the
+ * logo and the title screen and what they lead to, and over them the message
+ * window a scene is read in. They are in the order they were started, which is
+ * the order they are drawn in; cs2_system_layout is the first, the front end
+ * itself, and is NULL until a plane is started.
  */
+size_t cs2_system_layout_count(const cs2_system *system);
+const cs2_layout *cs2_system_layout_at(const cs2_system *system, size_t index);
 const cs2_layout *cs2_system_layout(const cs2_system *system);
 
 /*

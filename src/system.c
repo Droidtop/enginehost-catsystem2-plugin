@@ -24,6 +24,7 @@
 #include "startup.h"
 
 #define DOCUMENT_LIMIT 8
+#define LAYOUT_LIMIT 8
 #define VARIABLE_BYTES 0x10000u
 #define SYSTEM_VARIABLES 256
 #define SYSTEM_STRINGS 128
@@ -71,8 +72,17 @@ struct cs2_system {
     int scene_step;              /* the scene has something to run this frame */
     int boot_type;
     char boot_scenario[128];
-    cs2_layout *layout;          /* the .fes a started plane is running */
-    cs2_plane layout_plane;
+    /*
+     * The layouts that are running. A started plane runs one, and more than
+     * one plane is started at a time: the "main" plane runs flow.fes, the
+     * whole shape of the game, and the message window plane runs meswnd.fes
+     * over it for as long as a scene is being read.
+     */
+    struct {
+        cs2_plane plane;
+        cs2_layout *layout;
+    } layouts[LAYOUT_LIMIT];
+    size_t layout_count;
     cs2_kcs *flow;               /* the system script the layout has run */
     int boot_override;           /* the runner was told which boot to force */
     system_variable system_variables[SYSTEM_VARIABLES];
@@ -398,6 +408,16 @@ static void host_stop_script(void *context) {
     system->flow = NULL;
 }
 
+static void forget_the_layout(cs2_system *system, cs2_plane handle) {
+    for (size_t i = 0; i < system->layout_count; i++) {
+        if (system->layouts[i].plane != handle) continue;
+        cs2_layout_free(system->layouts[i].layout);
+        for (size_t j = i + 1; j < system->layout_count; j++) system->layouts[j - 1] = system->layouts[j];
+        system->layout_count--;
+        return;
+    }
+}
+
 static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
     plane->running = 1;
     plane->result = -1;
@@ -405,36 +425,65 @@ static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
         cs2_log("the plane %s was started with no layout", plane->name);
         return;
     }
-    if (system->layout != NULL) return;
+    forget_the_layout(system, plane->handle);
+    if (system->layout_count >= LAYOUT_LIMIT) {
+        cs2_log("the plane %s wanted %s and there is no room for another layout",
+                plane->name, plane->layout);
+        return;
+    }
     cs2_layout_host host = {
         system, host_flag, host_set_flag, host_set_string,
         host_run_script, host_stop_script
     };
-    system->layout = cs2_layout_start(system->files, plane->layout, &host);
-    system->layout_plane = plane->handle;
-    if (system->layout == NULL) cs2_log("%s", cs2_error());
+    cs2_layout *started = cs2_layout_start(system->files, plane->layout, &host);
+    if (started == NULL) {
+        cs2_log("%s", cs2_error());
+        return;
+    }
+    system->layouts[system->layout_count].plane = plane->handle;
+    system->layouts[system->layout_count].layout = started;
+    system->layout_count++;
 }
 
+/*
+ * The reader reaches every screen that is up, newest first: the message window
+ * is started after the front end and lies over it, and a screen that has no
+ * button where the reader pointed does nothing with it.
+ */
 void cs2_system_pointer(cs2_system *system, int x, int y) {
-    if (system != NULL) cs2_layout_pointer(system->layout, x, y);
+    if (system == NULL) return;
+    for (size_t i = system->layout_count; i-- > 0; ) cs2_layout_pointer(system->layouts[i].layout, x, y);
 }
 
 void cs2_system_click(cs2_system *system, int x, int y, int button) {
-    if (system != NULL) cs2_layout_click(system->layout, x, y, button);
+    if (system == NULL) return;
+    for (size_t i = system->layout_count; i-- > 0; ) cs2_layout_click(system->layouts[i].layout, x, y, button);
 }
 
 void cs2_system_press(cs2_system *system, cs2_layout_key key) {
-    if (system != NULL) cs2_layout_press(system->layout, key);
+    if (system == NULL) return;
+    for (size_t i = system->layout_count; i-- > 0; ) cs2_layout_press(system->layouts[i].layout, key);
+}
+
+size_t cs2_system_layout_count(const cs2_system *system) {
+    return system == NULL ? 0 : system->layout_count;
+}
+
+const cs2_layout *cs2_system_layout_at(const cs2_system *system, size_t index) {
+    if (system == NULL || index >= system->layout_count) return NULL;
+    return system->layouts[index].layout;
 }
 
 const cs2_layout *cs2_system_layout(const cs2_system *system) {
-    return system == NULL ? NULL : system->layout;
+    return cs2_system_layout_at(system, 0);
 }
 
 void cs2_system_draw(cs2_system *system, uint32_t *canvas, int width, int height) {
     if (system == NULL) return;
     cs2_planes_draw(system->planes, canvas, width, height);
-    cs2_layout_draw(system->layout, canvas, width, height);
+    for (size_t i = 0; i < system->layout_count; i++) {
+        cs2_layout_draw(system->layouts[i].layout, canvas, width, height);
+    }
 }
 
 void cs2_system_frame(cs2_system *system) {
@@ -445,10 +494,10 @@ void cs2_system_frame(cs2_system *system) {
      * something it starts part way through. A layout that has finished leaves
      * its answer on the plane, which is what 452 reads back.
      */
-    if (system->layout != NULL) {
-        cs2_layout_frame(system->layout);
-        cs2_plane_state *plane = cs2_plane_get(system->planes, system->layout_plane);
-        int result = cs2_layout_result(system->layout);
+    for (size_t i = 0; i < system->layout_count; i++) {
+        cs2_layout_frame(system->layouts[i].layout);
+        cs2_plane_state *plane = cs2_plane_get(system->planes, system->layouts[i].plane);
+        int result = cs2_layout_result(system->layouts[i].layout);
         if (plane != NULL && result >= 0) {
             plane->running = 0;
             plane->result = result;
@@ -613,8 +662,9 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE_VALUE;
     }
 
-    /* 67: and take it away again. */
+    /* 67: and take it away again, with whatever layout it was running. */
     case 67:
+        forget_the_layout(system, arg(arguments, argument_size, 0));
         cs2_plane_destroy(system->planes, arg(arguments, argument_size, 0));
         return CS2_KCS_DONE;
 
