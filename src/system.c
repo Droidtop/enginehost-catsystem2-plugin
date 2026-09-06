@@ -276,7 +276,7 @@ static const struct {
     {207, 2},  {238, 1},  {244, 1},  {294, 1},  {301, 2},  {311, 1},  {315, 1},
     {316, 1},  {323, 1},  {328, 1},  {329, 1},  {342, 2},  {344, 2},  {345, 2},
     {389, 1},  {402, 2},  {404, 2},  {419, 1},  {434, 2},  {455, 2},  {458, 2},
-    {466, 2},  {515, 1},  {542, 2},  {572, 2},  {586, 2},  {593, 2},  {594, 1},
+    {466, 2},  {515, 1},  {542, 2},  {572, 2},  {586, 2},  {594, 1},
     {630, 2},  {633, 1},  {645, 2},  {646, 1},  {696, 1},  {739, 2},  {741, 1},
     {785, 2},  {790, 1},  {863, 1},  {866, 1},  {925, 1}
 };
@@ -497,16 +497,21 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE_VALUE;
     }
 
-    /* 277: write one of the game's numbered strings into the script's memory. */
+    /*
+     * 277: read one of those back into the script's memory. Its handler
+     * answers whether the number held anything - not the address written to,
+     * which is what this used to say - and empties the destination when it
+     * did not.
+     */
     case 277: {
         uint32_t number = arg(arguments, argument_size, 0);
         uint32_t destination = arg(arguments, argument_size, 1);
         const char *value = cs2_system_string(system, number);
+        *answer = value != NULL;
         if (value == NULL) value = "";
         size_t length = strlen(value) + 1;
         char *at = cs2_kcs_at(script, destination, (uint32_t) length);
         if (at != NULL) memcpy(at, value, length);
-        *answer = destination;
         return CS2_KCS_DONE_VALUE;
     }
 
@@ -566,6 +571,26 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
             if (at != NULL) memcpy(at, source, length);
         }
         *answer = destination;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 15: add a string to the end of one already in the script's memory.
+     *
+     * This is how every path the game looks a value up by is built: "default",
+     * then "/mes/", then "script", and the theme document is asked for
+     * "default/mes/script".
+     */
+    case 15: {
+        uint32_t destination = arg(arguments, argument_size, 0);
+        const char *added = cs2_kcs_string(script, arg(arguments, argument_size, 1));
+        char *at = cs2_kcs_at(script, destination, 1);
+        *answer = destination;
+        if (at == NULL || added == NULL) return CS2_KCS_DONE_VALUE;
+        size_t already = strlen(at);
+        size_t length = strlen(added) + 1;
+        char *end = cs2_kcs_at(script, destination + (uint32_t) already, (uint32_t) length);
+        if (end != NULL) memcpy(end, added, length);
         return CS2_KCS_DONE_VALUE;
     }
 
@@ -728,9 +753,21 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE_VALUE;
     }
 
-    /* 276: hand a block of the script's memory to the engine, by number. */
-    case 276:
+    /*
+     * 276: keep a string the script has built, under a number, for every
+     * script to read back with 277.
+     *
+     * These are adv.xml's "sysstr" - the file a new game starts on (200), the
+     * window theme document (800), the name of the theme inside it (801). The
+     * boot script writes them and the system script reads them, so they cannot
+     * belong to either: they are the same bank a layout writes with $str.
+     */
+    case 276: {
+        uint32_t number = arg(arguments, argument_size, 0);
+        const char *value = cs2_kcs_string(script, arg(arguments, argument_size, 1));
+        cs2_system_set_string(system, number, value == NULL ? "" : value);
         return CS2_KCS_DONE;
+    }
 
     /*
      * 318, 319: where a run has got to. The arguments are the value it starts
@@ -938,6 +975,30 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         }
         return CS2_KCS_DONE;
     }
+    /*
+     * 593: a value out of one of those documents, written into the script's
+     * own memory as a string.
+     *
+     * This is how the game finds the layout for its message window. main.kcs
+     * reads etc/defwnd out of adv.xml - "meswnd01.xml" - and sscript opens
+     * that document and asks it for "<theme>/mes/script", which is
+     * "meswnd.fes". Without it the theme table stayed empty and the meswnd
+     * plane was started with no layout at all.
+     */
+    case 593: {
+        uint32_t handle = arg(arguments, argument_size, 0);
+        uint32_t destination = arg(arguments, argument_size, 1);
+        const char *path = cs2_kcs_text(script, arg(arguments, argument_size, 2));
+        const cs2_startup *document = handle >= 1 && handle <= DOCUMENT_LIMIT
+            ? system->documents[handle - 1] : NULL;
+        const char *value = path == NULL ? NULL : cs2_startup_value(document, path);
+        if (value == NULL) value = "";
+        size_t length = strlen(value) + 1;
+        char *at = cs2_kcs_at(script, destination, (uint32_t) length);
+        if (at != NULL) memcpy(at, value, length);
+        return CS2_KCS_DONE;
+    }
+
     case 592: {
         uint32_t handle = arg(arguments, argument_size, 0);
         int fallback = (int) (int32_t) arg(arguments, argument_size, 1);
