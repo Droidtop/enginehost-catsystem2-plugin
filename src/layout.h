@@ -22,6 +22,8 @@
 #ifndef CS2_LAYOUT_H
 #define CS2_LAYOUT_H
 
+#include <stdint.h>
+
 #include "fes.h"
 
 typedef struct cs2_layout cs2_layout;
@@ -36,6 +38,14 @@ typedef struct {
     int32_t (*flag)(void *context, int number);
     void (*set_flag)(void *context, int number, int32_t value);
     void (*set_string)(void *context, int number, const char *text);
+    /*
+     * One of those strings as a reader should see it: the game's own
+     * substitutions applied and the message markup taken off. The message
+     * window appends its line this way - "str apend $str1000" - so the
+     * conversion belongs where the rest of the game's text is done, not in a
+     * layout. The caller frees what comes back.
+     */
+    char *(*text_of)(void *context, int number);
     void (*run_script)(void *context, const char *name);
     void (*stop_script)(void *context);
 } cs2_layout_host;
@@ -92,6 +102,27 @@ void cs2_layout_click(cs2_layout *layout, int x, int y, int button);
 
 /* The pad. */
 void cs2_layout_press(cs2_layout *layout, cs2_layout_key key);
+
+/*
+ * The command channel: how the system script drives a screen it has started.
+ *
+ * The message window is not run by the reader but by sscript, and the way it
+ * reaches it is a named section. The script writes the arguments into the
+ * layout's own locals (engine function 645), sends the command by name (630),
+ * and reads whatever the section left behind back out of a local (646):
+ *
+ *     645(meswnd, 0, 1)  645(meswnd, 1, 0) ...   \0 = 1, \1 = 0
+ *     630(meswnd, "MES_SETSTATE")               #MES_SETSTATE runs
+ *     646(meswnd, 0)                            what it answered
+ *
+ * meswnd.fes has thirty of these - MES_SETSTRING, MES_DRAW, MES_SHOW,
+ * MES_WAITINPUT and the rest - and they are the whole of reading a scene. A
+ * command runs to its end there and then, not a frame at a time: the script
+ * sends the next one on the line after.
+ */
+void cs2_layout_send(cs2_layout *layout, const char *command);
+void cs2_layout_set_local(cs2_layout *layout, int number, int32_t value);
+int32_t cs2_layout_local(const cs2_layout *layout, int number);
 
 /*
  * Draws the layout and its children onto an ARGB canvas, in priority order.

@@ -37,7 +37,8 @@ typedef enum {
     CS2_FES_PLANE,
     CS2_FES_IMAGE,
     CS2_FES_BUTTON,
-    CS2_FES_SOUND
+    CS2_FES_SOUND,
+    CS2_FES_STRING
 } cs2_fes_kind;
 
 /*

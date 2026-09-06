@@ -60,6 +60,7 @@ static cs2_fes_kind kind_of(const char *word) {
         || strcmp(word, "DIFIMAGE") == 0) return CS2_FES_IMAGE;
     if (strcmp(word, "BUTTON") == 0) return CS2_FES_BUTTON;
     if (strcmp(word, "SOUND") == 0) return CS2_FES_SOUND;
+    if (strcmp(word, "STRING") == 0) return CS2_FES_STRING;
     return CS2_FES_OTHER;
 }
 
@@ -71,10 +72,19 @@ static void pair(const char *value, int *x, int *y) {
 
 /* ------------------------------------------------------------ the container */
 
+/*
+ * A layout is named either way. The boot script gives its plane "flow", and
+ * the window theme document gives the message window "meswnd.fes", so the
+ * suffix is taken off before it is put back on.
+ */
 static char *inflate_layout(cs2_files *files, const char *name, char store[64]) {
     char path[160];
-    snprintf(path, sizeof path, "fes.int/%s.fes", name);
-    snprintf(store, 64, "%s", name);
+    size_t length = strlen(name);
+    if (length > 4 && strcmp(name + length - 4, ".fes") == 0) length -= 4;
+    if (length > 63) length = 63;
+    memcpy(store, name, length);
+    store[length] = 0;
+    snprintf(path, sizeof path, "fes.int/%s.fes", store);
     cs2_bytes packed = {0};
     if (cs2_files_read(files, path, &packed) != 0) {
         cs2_set_error("there is no layout %s in this game", path);

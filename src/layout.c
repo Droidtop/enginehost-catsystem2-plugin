@@ -16,9 +16,17 @@
 #include "cs2.h"
 #include "hg3.h"
 
-#define LOCALS 32
+/*
+ * A layout's own numbered variables. Thirty-two was what the title screen
+ * needed and it is not what the game needs: twelve of the thirty-five layouts
+ * go past it, meswnd.fes as high as \500, and an assignment out of range was
+ * simply dropped - which is why the message window read its own "\52 = \0"
+ * as nothing and never drew the line it had been given.
+ */
+#define LOCALS 512
 #define CALL_DEPTH 16
 #define LINE_BUDGET 20000
+#define COMMANDS_SAID 48
 
 typedef struct {
     int section;
@@ -44,6 +52,19 @@ struct object_state {
     int fade_from, fade_to;
     int boxes_read;          /* its picture has been asked where it is */
     object_box boxes[CS2_FES_IDS];
+
+    /*
+     * A STRING object: the message window's own text. The script appends a
+     * line to it and tells it to draw, and it comes out a character at a time
+     * at the speed the reader has configured - that is what the window is
+     * waiting for while sscript asks it MES_ISDRAW every frame.
+     */
+    char *text;
+    size_t text_bytes;           /* how much of the buffer is used, with the 0 */
+    size_t shown;                /* how many bytes of it have been revealed */
+    int drawing;
+    int frames_each;             /* frames a character takes; 0 is at once */
+    int frames_left;
 };
 
 struct cs2_layout {
@@ -75,6 +96,8 @@ struct cs2_layout {
     int32_t click_left, click_right;
     int focus;               /* the object the pad is on, -1 for none */
     int said_buttons;        /* the screen has named its buttons in the log once */
+    char said[COMMANDS_SAID][32];  /* the commands it has been sent, said once each */
+    int said_count;
     int at_index;            /* what [@] means: the button whose event is running */
     int went;                /* the script has just changed state with next */
 };
@@ -299,6 +322,119 @@ static int motions_running(const cs2_layout *layout) {
 }
 
 /*
+ * What a STRING object is told to hold. "$str1000" is one of the game's
+ * numbered strings - the line sscript has just read - and anything else is
+ * taken as itself, which is what the few literal appends in the layouts want.
+ * The caller frees it.
+ */
+static char *string_argument(cs2_layout *layout, const char *token) {
+    if (strncmp(token, "$str", 4) == 0 && layout->host.text_of != NULL) {
+        return layout->host.text_of(layout->host.context, atoi(token + 4));
+    }
+    size_t length = strlen(token);
+    char *copy = malloc(length + 1);
+    if (copy != NULL) memcpy(copy, token, length + 1);
+    return copy;
+}
+
+static void string_append(object_state *object, const char *added) {
+    if (added == NULL || added[0] == 0) return;
+    size_t already = object->text_bytes == 0 ? 0 : object->text_bytes - 1;
+    size_t length = strlen(added);
+    char *grown = realloc(object->text, already + length + 1);
+    if (grown == NULL) return;
+    memcpy(grown + already, added, length + 1);
+    object->text = grown;
+    object->text_bytes = already + length + 1;
+}
+
+static void string_clear(object_state *object) {
+    free(object->text);
+    object->text = NULL;
+    object->text_bytes = 0;
+    object->shown = 0;
+    object->drawing = 0;
+    object->frames_left = 0;
+}
+
+/* One character forward, in bytes, so a two-byte glyph appears whole. */
+static size_t next_character(const char *text, size_t at) {
+    if (text[at] == 0) return at;
+    at++;
+    while ((text[at] & 0xc0) == 0x80) at++;
+    return at;
+}
+
+static void strings_step(cs2_layout *layout) {
+    for (size_t i = 0; i < layout->object_count; i++) {
+        object_state *object = &layout->objects[i];
+        if (!object->drawing || object->text == NULL) continue;
+        if (object->frames_each > 0 && --object->frames_left > 0) continue;
+        object->frames_left = object->frames_each;
+        object->shown = object->frames_each > 0
+            ? next_character(object->text, object->shown)
+            : object->text_bytes - 1;
+        if (object->shown >= object->text_bytes - 1) {
+            object->shown = object->text_bytes - 1;
+            object->drawing = 0;
+        }
+    }
+}
+
+/*
+ * The message window's own vocabulary. A STRING object is a box of text: the
+ * script appends a line to it, tells it to draw, and asks it every frame
+ * whether it has finished - which is what MES_ISDRAW is, and what the answer
+ * goes into \0 for.
+ */
+static int string_command(cs2_layout *layout, object_state *object,
+                          const char *command, const char *rest) {
+    if (strcmp(command, "apend") == 0) {
+        char token[128] = "";
+        sscanf(rest, "%127s", token);
+        char *added = string_argument(layout, token);
+        string_append(object, added);
+        free(added);
+        return 1;
+    }
+    if (strcmp(command, "clear") == 0 || strcmp(command, "reset") == 0) {
+        string_clear(object);
+        return 1;
+    }
+    if (strcmp(command, "draw") == 0) {
+        object->drawing = object->text != NULL
+            && object->shown < object->text_bytes - 1;
+        object->frames_left = object->frames_each;
+        if (object->text != NULL && object->text[0] != 0) {
+            cs2_log("%s.fes draws in %s: %s", cs2_fes_name(layout->fes),
+                    object->declared.name, object->text);
+        }
+        return 1;
+    }
+    if (strcmp(command, "skip") == 0) {
+        object->shown = object->text_bytes == 0 ? 0 : object->text_bytes - 1;
+        object->drawing = 0;
+        return 1;
+    }
+    if (strcmp(command, "isdraw") == 0) {
+        layout->locals[0] = object->drawing;
+        return 1;
+    }
+    if (strcmp(command, "layout") == 0) {
+        char what[32] = "";
+        int value = 0;
+        if (sscanf(rest, "%31s %d", what, &value) == 2
+            && strcmp(what, "frame") == 0) {
+            object->frames_each = value < 0 ? 0 : value;
+        }
+        return 1;
+    }
+    /* apendmark, userfont, userfontobj, pos2, getpos2, the colours and the
+       margins are how the window is dressed, not what it says. */
+    return 1;
+}
+
+/*
  * A command addressed to an object: "pl_bgi fade 60 0 255", "btn_d disp 1",
  * "btn_d[4] enable 0". A bare name is every element of the array, which is how
  * the files switch a whole row of buttons at once.
@@ -319,7 +455,10 @@ static int object_command(cs2_layout *layout, const char *line) {
     from = 0;
     object_state *object;
     while ((object = object_of(layout, token, &from)) != NULL) {
-        if (strcmp(command, "disp") == 0) object->declared.disp = a;
+        if (object->declared.kind == CS2_FES_STRING
+            && strcmp(command, "disp") != 0) {
+            string_command(layout, object, command, rest);
+        } else if (strcmp(command, "disp") == 0) object->declared.disp = a;
         else if (strcmp(command, "enable") == 0) object->declared.enable = a;
         else if (strcmp(command, "noact") == 0) object->declared.enable = a == 0;
         else if (strcmp(command, "setid") == 0) object->current_id = a;
@@ -371,8 +510,13 @@ static void go_to(cs2_layout *layout, const char *name) {
     layout->depth = 0;
 }
 
-/* One frame's worth of a layout's script. */
-static void run(cs2_layout *layout) {
+/*
+ * The statements. One frame of the state a layout is in (one_frame), or one
+ * command section run out to its end (not one_frame): a command is not a
+ * state, so where a frame would stop and come back next time - the end of the
+ * section, a break at the bottom, a wait - the command is simply over.
+ */
+static void run_lines(cs2_layout *layout, int one_frame) {
     for (int budget = 0; budget < LINE_BUDGET; budget++) {
         size_t count = cs2_fes_section_lines(layout->fes, layout->section);
         if (layout->line >= count) {
@@ -383,7 +527,7 @@ static void run(cs2_layout *layout) {
                 continue;
             }
             layout->line = 0;              /* the state runs again next frame */
-            return;
+            return;                        /* and a command is finished */
         }
         const char *line = line_at(layout, layout->section, layout->line);
         if (line == NULL || line[0] == 0) {
@@ -456,8 +600,10 @@ static void run(cs2_layout *layout) {
             const char *rest = line + 4;
             while (*rest == ' ') rest++;
             layout->line++;
-            if (*rest >= '0' && *rest <= '9') layout->wait_frames = atoi(rest);
-            else layout->wait_motion = 1;
+            if (one_frame) {
+                if (*rest >= '0' && *rest <= '9') layout->wait_frames = atoi(rest);
+                else layout->wait_motion = 1;
+            }
             return;
         }
         if (strcmp(word, "exit") == 0) {
@@ -536,6 +682,65 @@ static void run(cs2_layout *layout) {
     layout->line = 0;
 }
 
+/*
+ * A command from outside. It runs on its own: the state the layout is in is
+ * put aside and given back afterwards, so a command sent while the message
+ * window is waiting for the reader does not lose its place in #WAIT_USER.
+ *
+ * A screen that has no section of that name simply does not answer it - a
+ * layout implements the commands it is for and no more.
+ */
+void cs2_layout_send(cs2_layout *layout, const char *command) {
+    if (layout == NULL || command == NULL) return;
+    int section = cs2_fes_section(layout->fes, command);
+
+    /*
+     * Say each command once. The script sends MES_ISDRAW every frame it is
+     * waiting, so saying them all would be the whole log; saying each the
+     * first time is what tells a reader of the log what a screen was asked to
+     * do, and which of the asks it has no answer for.
+     */
+    int said = 0;
+    for (int i = 0; i < layout->said_count; i++) {
+        if (strcmp(layout->said[i], command) == 0) said = 1;
+    }
+    if (!said) {
+        if (layout->said_count < COMMANDS_SAID) {
+            snprintf(layout->said[layout->said_count], 32, "%s", command);
+            layout->said_count++;
+        }
+        cs2_log("%s.fes is sent %s%s", cs2_fes_name(layout->fes), command,
+                section < 0 ? ", which it has no section for" : "");
+    }
+    if (section < 0) return;
+
+    int was_section = layout->section;
+    size_t was_line = layout->line;
+    int was_depth = layout->depth;
+    call_frame was_stack[CALL_DEPTH];
+    memcpy(was_stack, layout->stack, sizeof was_stack);
+
+    layout->section = section;
+    layout->line = 0;
+    layout->depth = 0;
+    run_lines(layout, 0);
+
+    layout->section = was_section;
+    layout->line = was_line;
+    layout->depth = was_depth;
+    memcpy(layout->stack, was_stack, sizeof layout->stack);
+}
+
+void cs2_layout_set_local(cs2_layout *layout, int number, int32_t value) {
+    if (layout == NULL || number < 0 || number >= LOCALS) return;
+    layout->locals[number] = value;
+}
+
+int32_t cs2_layout_local(const cs2_layout *layout, int number) {
+    if (layout == NULL || number < 0 || number >= LOCALS) return 0;
+    return layout->locals[number];
+}
+
 /* --------------------------------------------------------------- the layout */
 
 cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layout_host *host) {
@@ -559,7 +764,7 @@ cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layou
         layout->objects = calloc(layout->object_count, sizeof *layout->objects);
         if (layout->objects == NULL) {
             cs2_layout_free(layout);
-            cs2_set_error("out of memory for the objects of %s.fes", name);
+            cs2_set_error("out of memory for the objects of %s.fes", cs2_fes_name(layout->fes));
             return NULL;
         }
         for (size_t i = 0; i < layout->object_count; i++) {
@@ -571,10 +776,11 @@ cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layou
     layout->section = cs2_fes_section(layout->fes, "START");
     snprintf(layout->state, sizeof layout->state, "START");
     if (layout->section < 0) {
-        cs2_log("%s.fes has no #START", name);
+        cs2_log("%s.fes has no #START", cs2_fes_name(layout->fes));
         layout->section = 0;
     }
-    cs2_log("the layout %s.fes is running, %zu objects", name, layout->object_count);
+    cs2_log("the layout %s.fes is running, %zu objects", cs2_fes_name(layout->fes),
+            layout->object_count);
     return layout;
 }
 
@@ -582,6 +788,7 @@ void cs2_layout_free(cs2_layout *layout) {
     if (layout == NULL) return;
     cs2_layout_free(layout->child);
     cs2_fes_free(layout->fes);
+    for (size_t i = 0; i < layout->object_count; i++) free(layout->objects[i].text);
     free(layout->objects);
     free(layout);
 }
@@ -605,13 +812,14 @@ const char *cs2_layout_state(const cs2_layout *layout) {
 void cs2_layout_frame(cs2_layout *layout) {
     if (layout == NULL) return;
     motions_step(layout);
+    strings_step(layout);
     if (layout->wait_frames > 0) {
         layout->wait_frames--;
     } else if (layout->wait_motion && motions_running(layout)) {
         /* still moving */
     } else {
         layout->wait_motion = 0;
-        run(layout);
+        run_lines(layout, 1);
         /* The script has had its look at the click, so it is spent. A click
            made while the screen was waiting is still there when it wakes. */
         layout->click_left = 0;
@@ -878,7 +1086,7 @@ static void run_event(cs2_layout *layout, int section, int at_index) {
     layout->line = 0;
     layout->depth = 0;
     layout->went = 0;
-    run(layout);
+    run_lines(layout, 1);
     int went = layout->went;
 
     layout->at_index = at_was;
