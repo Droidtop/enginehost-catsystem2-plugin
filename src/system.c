@@ -450,6 +450,42 @@ static const char *list_field(const char *list, size_t size, uint32_t index) {
     return (at < size && list[at] != 0) ? list + at : NULL;
 }
 
+/*
+ * The object-message protocol.
+ *
+ * A CatSystem2 object is not called, it is sent a numbered message: every one
+ * of these engine functions ends in one virtual method, the object system's
+ * slot at +0x10, given the owner, the object, a message number and up to three
+ * things to carry. 258 is 0x114, 520 asks 0x174, 853 is 0x1EA, 854 0x1EB, 855
+ * 0x1EC, 936 0x21. One shape, a table of numbers on top of it.
+ *
+ * The objects are the planes. main.kcs makes the image list with function 66
+ * and stores that handle in the persistent variables at offset 8, which is the
+ * [0x27918] sscript sends its per-frame 0x114 to; so a message's target is a
+ * handle out of the same table this engine already keeps its planes in, and
+ * this is where the two meet.
+ *
+ * What each message MEANS is not written yet, and it is deliberately not
+ * guessed: this says what was sent and to what, so the next reading of the
+ * original starts from the traffic the game actually makes rather than from a
+ * list of function numbers. An answer of 0 is what every one of these
+ * functions gave before, so nothing above it changes behaviour today.
+ */
+static uint32_t object_message(cs2_system *system, cs2_kcs *script, uint32_t target,
+                               uint32_t message, const uint32_t *values, size_t count) {
+    char carried[128];
+    size_t at = 0;
+    for (size_t i = 0; i < count && at + 24 < sizeof carried; i++) {
+        at += (size_t) snprintf(carried + at, sizeof carried - at, i == 0 ? "%d" : ", %d",
+                                (int) (int32_t) values[i]);
+    }
+    const cs2_plane_state *plane = cs2_plane_get(system->planes, target);
+    cs2_log("%s: object %u (%s) is sent %#x (%s)", cs2_kcs_name(script), target,
+            plane == NULL ? "no plane of this screen" : plane->name, message,
+            at == 0 ? "" : carried);
+    return 0;
+}
+
 static void write_text(cs2_kcs *script, uint32_t address, const char *text) {
     size_t length = strlen(text) + 1;
     char *out = cs2_kcs_at(script, address, (uint32_t) length);
@@ -1086,6 +1122,41 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         system->scene_step = 1;
         *answer = 1;
         return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * The message sends themselves. Each names its object in argument 0 and
+     * carries what the original pushes after the message number; 853 also
+     * carries a small block built out of arguments 1 to 5, which is not
+     * unpacked here because nothing reads it yet.
+     */
+    case 258: {
+        uint32_t values[] = { arg(arguments, argument_size, 1) };
+        object_message(system, script, arg(arguments, argument_size, 0), 0x114, values, 1);
+        return CS2_KCS_DONE;
+    }
+    case 520: {
+        uint32_t values[] = { 0 };
+        *answer = object_message(system, script, arg(arguments, argument_size, 0),
+                                 0x174, values, 0);
+        return CS2_KCS_DONE_VALUE;
+    }
+    case 853: {
+        uint32_t values[] = {
+            arg(arguments, argument_size, 1), arg(arguments, argument_size, 4),
+            arg(arguments, argument_size, 5),
+        };
+        object_message(system, script, arg(arguments, argument_size, 0), 0x1EA, values, 3);
+        return CS2_KCS_DONE;
+    }
+    case 854: {
+        object_message(system, script, arg(arguments, argument_size, 0), 0x1EB, NULL, 0);
+        return CS2_KCS_DONE;
+    }
+    case 855: {
+        uint32_t values[] = { arg(arguments, argument_size, 1) };
+        object_message(system, script, arg(arguments, argument_size, 0), 0x1EC, values, 1);
+        return CS2_KCS_DONE;
     }
 
     /*
