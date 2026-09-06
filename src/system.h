@@ -18,8 +18,8 @@
 
 #include "files.h"
 #include "kcs.h"
+#include "layout.h"
 #include "plane.h"
-#include "scene.h"
 #include "scene.h"
 
 typedef struct cs2_system cs2_system;
@@ -35,51 +35,40 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
 void cs2_system_event(cs2_system *system, uint32_t event);
 
 /*
- * One frame of the engine's own side: the clock the scripts read, and the
- * system script a started plane runs. Call it once a frame, after the boot
- * script has had its turn.
+ * One frame of the engine's own side: the clock the scripts read, the layout a
+ * started plane runs, and the system script that layout has started. Call it
+ * once a frame, after the boot script has had its turn.
  */
 void cs2_system_frame(cs2_system *system);
 
 /*
  * The scenario: the scene script the system script has put on the screen. The
- * front end does not draw the title, a menu or a line of dialogue itself - it
- * loads a scene script (325) and steps it (330, 331), and everything the scene
- * player already does happens on the far side of that. NULL until one is
- * loaded.
+ * title screen and the menus are the game's own .fes layouts, but a line of
+ * dialogue is not: the system script loads a scene script (325) and steps it
+ * (330, 331), and everything the scene player does happens on the far side of
+ * that. NULL until one is loaded.
  */
 const cs2_scene *cs2_system_scenario(const cs2_system *system);
 
 /*
- * What the system script boots into, which in the game is set by whatever
- * starts it rather than by a script: the boot type (-1 a new game, -2 a
- * recollection, -10 scene select, -20 the ordinary boot through start.txt,
- * anything else a saved game to load) and, for the branches that need one, the
- * scene script that game begins on. adv.xml names the numbers these are kept
- * under; they are written into those the moment the system script starts,
- * which is when the game's own engine has them.
+ * Forces what the system script boots into, which the game itself does not need:
+ * flow.fes writes the boot type into flag 512 before it runs the script, so a
+ * game left to itself boots the way its own layout says. This is the runner's
+ * override, for opening a game straight on one of the other ways in: -1 a new
+ * game, -2 a recollection, -10 scene select, -20 the boot through start.txt,
+ * anything else a saved game to load, with the scene script the branches that
+ * need one begin on. adv.xml names the numbers both are kept under.
  */
 void cs2_system_set_boot(cs2_system *system, int type, const char *scenario);
 
 /*
- * The scenario: the scene script the system script has put on the screen. The
- * front end does not draw the title, a menu or a line of dialogue itself - it
- * loads a scene script (325) and steps it (330, 331), and everything the scene
- * player already does happens on the far side of that. NULL until one is
- * loaded.
+ * The layout a started plane is running: the game's own front end, the logo
+ * and the title screen and what they lead to. NULL until a plane is started.
  */
-const cs2_scene *cs2_system_scenario(const cs2_system *system);
+const cs2_layout *cs2_system_layout(const cs2_system *system);
 
-/*
- * What the system script boots into, which in the game is set by whatever
- * starts it rather than by a script: the boot type (-1 a new game, -2 a
- * recollection, -10 scene select, -20 the ordinary boot through start.txt,
- * anything else a saved game to load) and, for the branches that need one, the
- * scene script that game begins on. adv.xml names the numbers these are kept
- * under; they are written into those the moment the system script starts,
- * which is when the game's own engine has them.
- */
-void cs2_system_set_boot(cs2_system *system, int type, const char *scenario);
+/* The whole screen the front end has built: the planes and their layouts. */
+void cs2_system_draw(cs2_system *system, uint32_t *canvas, int width, int height);
 
 /* The screen as the scripts have built it, for drawing and for logs. */
 const cs2_planes *cs2_system_planes(const cs2_system *system);
@@ -101,9 +90,8 @@ void *cs2_system_variables(cs2_system *system, uint32_t *size);
 int cs2_system_finished(const cs2_system *system);
 
 /*
- * The system script a started plane is running, or NULL. The runner prints
- * where it has got to beside the boot script, because between the two of them
- * they are the whole of the game's front end.
+ * The system script the front end has started with execkcs, or NULL. The runner
+ * prints where it has got to beside the boot script and the layout.
  */
 const cs2_kcs *cs2_system_script(const cs2_system *system);
 

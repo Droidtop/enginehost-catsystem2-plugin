@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "cs2.h"
+#include "layout.h"
 #include "scene.h"
 #include "startup.h"
 
@@ -86,8 +87,10 @@ struct cs2_system {
     char boot_scenario[128];
     scene_command commands[SCENE_COMMANDS];
     size_t command_count;
-    cs2_kcs *flow;               /* the system script a started plane runs */
-    cs2_plane flow_plane;
+    cs2_layout *layout;          /* the .fes a started plane is running */
+    cs2_plane layout_plane;
+    cs2_kcs *flow;               /* the system script the layout has run */
+    int boot_override;           /* the runner was told which boot to force */
     system_variable system_variables[SYSTEM_VARIABLES];
     size_t system_variable_count;
     system_string system_strings[SYSTEM_STRINGS];
@@ -230,6 +233,7 @@ const cs2_scene *cs2_system_scenario(const cs2_system *system) {
 
 void cs2_system_set_boot(cs2_system *system, int type, const char *scenario) {
     if (system == NULL) return;
+    system->boot_override = 1;
     system->boot_type = type;
     snprintf(system->boot_scenario, sizeof system->boot_scenario, "%s",
              scenario == NULL ? "" : scenario);
@@ -325,21 +329,39 @@ static int wait_for_the_reader(cs2_system *system, cs2_kcs *script,
 }
 
 /*
- * Starting a plane (448) is what hands the game over to its own system script.
- * The boot script builds the screen and then starts the plane it gave the
- * layout "flow" to; in the game's engine that plane is the host of sscript.kcs,
- * the script that draws the title screen, begins a new game and does the saving
- * and loading. It is run here beside the boot script, one frame each, sharing
- * the same persistent variables, because they are two halves of one game.
+ * Starting a plane (448) starts its layout, and the layout is the game.
+ *
+ * The boot script gives its "main" plane the layout "flow" and starts it, and
+ * flow.fes is the whole shape of Labyrinth of Grisaia: it shows the logo, then
+ * the title screen, and when the title answers "new game" it writes -1 into
+ * flag 512 - the flag adv.xml calls sysflag/boot - and runs kcs.int/sscript.kcs.
+ * So the boot type is not set by the engine at all: the game's own layout sets
+ * it, which is why nothing in either script and no string in Grisaia2.bin ever
+ * named it.
  */
-static void start_the_system_script(cs2_system *system, cs2_plane_state *plane) {
-    plane->running = 1;
-    plane->result = -1;
-    system->flow_plane = plane->handle;
+static int32_t host_flag(void *context, int number) {
+    cs2_system *system = context;
+    uint32_t *at = system_variable_at(system, (uint32_t) number, 0);
+    return at == NULL ? 0 : (int32_t) *at;
+}
+
+static void host_set_flag(void *context, int number, int32_t value) {
+    cs2_system_set_variable(context, (uint32_t) number, (uint32_t) value);
+}
+
+static void host_set_string(void *context, int number, const char *text) {
+    cs2_system_set_string(context, (uint32_t) number, text);
+}
+
+/* execkcs: the layout starts one of the game's system scripts beside itself. */
+static void host_run_script(void *context, const char *name) {
+    cs2_system *system = context;
     if (system->flow != NULL) return;
-    system->flow = cs2_kcs_load(system->files, "kcs.int/sscript.kcs");
+    char path[160];
+    snprintf(path, sizeof path, "kcs.int/%s.kcs", name);
+    system->flow = cs2_kcs_load(system->files, path);
     if (system->flow == NULL) {
-        cs2_log("the plane %s was started but %s", plane->name, cs2_error());
+        cs2_log("the layout asked for %s but %s", path, cs2_error());
         return;
     }
     cs2_kcs_set_variables(system->flow, system->variables, VARIABLE_BYTES);
@@ -347,42 +369,81 @@ static void start_the_system_script(cs2_system *system, cs2_plane_state *plane) 
     cs2_kcs_trace(system->flow, 1);
 
     /*
-     * What the system script boots into. The boot script has by now read the
-     * numbers out of adv.xml and left them where the engine keeps them - the
-     * flag the boot type is held in at 0x80004884, the string the start file
-     * is held in at 0x800048D8 - so the two are written under those numbers,
-     * which is what the game's own engine does before it starts the script.
+     * What it boots into. The numbers adv.xml keeps them under are in the
+     * persistent block by now, put there by the boot script; the layout has
+     * already written the boot type into the flag, so the engine only writes
+     * one when the runner was told to force it.
      */
     uint32_t boot_flag = 0, boot_string = 0;
     memcpy(&boot_flag, system->variables + 0x4884u, 4);
     memcpy(&boot_string, system->variables + 0x48D8u, 4);
-    cs2_system_set_variable(system, boot_flag, (uint32_t) (int32_t) system->boot_type);
-    if (system->boot_scenario[0] != 0) {
-        cs2_system_set_string(system, boot_string, system->boot_scenario);
+    if (system->boot_override) {
+        cs2_system_set_variable(system, boot_flag, (uint32_t) (int32_t) system->boot_type);
+        if (system->boot_scenario[0] != 0) {
+            cs2_system_set_string(system, boot_string, system->boot_scenario);
+        }
     }
-    cs2_log("the plane %s runs kcs.int/sscript.kcs, boot type %d%s%s", plane->name,
-            system->boot_type, system->boot_scenario[0] == 0 ? "" : " from ",
-            system->boot_scenario);
+    cs2_log("%s starts, boot type %d", path, host_flag(system, (int) boot_flag));
+}
+
+static void host_stop_script(void *context) {
+    cs2_system *system = context;
+    if (system->flow == NULL) return;
+    cs2_kcs_set_variables(system->flow, NULL, 0);
+    cs2_kcs_free(system->flow);
+    system->flow = NULL;
+}
+
+static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
+    plane->running = 1;
+    plane->result = -1;
+    if (plane->layout[0] == 0) {
+        cs2_log("the plane %s was started with no layout", plane->name);
+        return;
+    }
+    if (system->layout != NULL) return;
+    cs2_layout_host host = {
+        system, host_flag, host_set_flag, host_set_string,
+        host_run_script, host_stop_script
+    };
+    system->layout = cs2_layout_start(system->files, plane->layout, &host);
+    system->layout_plane = plane->handle;
+    if (system->layout == NULL) cs2_log("%s", cs2_error());
+}
+
+const cs2_layout *cs2_system_layout(const cs2_system *system) {
+    return system == NULL ? NULL : system->layout;
+}
+
+void cs2_system_draw(cs2_system *system, uint32_t *canvas, int width, int height) {
+    if (system == NULL) return;
+    cs2_planes_draw(system->planes, canvas, width, height);
+    cs2_layout_draw(system->layout, canvas, width, height);
 }
 
 void cs2_system_frame(cs2_system *system) {
     if (system == NULL) return;
     system->frame++;
+    /*
+     * The layout first: it is the front end, and the system script it runs is
+     * something it starts part way through. A layout that has finished leaves
+     * its answer on the plane, which is what 452 reads back.
+     */
+    if (system->layout != NULL) {
+        cs2_layout_frame(system->layout);
+        cs2_plane_state *plane = cs2_plane_get(system->planes, system->layout_plane);
+        int result = cs2_layout_result(system->layout);
+        if (plane != NULL && result >= 0) {
+            plane->running = 0;
+            plane->result = result;
+        }
+    }
     if (system->flow == NULL) return;
     int running = cs2_kcs_frame(system->flow, 2000000);
     if (running < 0) {
         cs2_log("kcs.int/sscript.kcs: %s", cs2_error());
     }
-    if (running <= 0) {
-        cs2_plane_state *plane = cs2_plane_get(system->planes, system->flow_plane);
-        if (plane != NULL) {
-            plane->running = 0;
-            plane->result = running < 0 ? 1 : 0;
-        }
-        cs2_kcs_set_variables(system->flow, NULL, 0);
-        cs2_kcs_free(system->flow);
-        system->flow = NULL;
-    }
+    if (running <= 0) host_stop_script(system);
 }
 
 /* ----------------------------------------------------------- the functions */
@@ -817,10 +878,10 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE;
     }
 
-    /* 448: start it. This is where the game hands over to its system script. */
+    /* 448: start it. This is where the game hands over to its own front end. */
     case 448: {
         cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
-        if (plane != NULL) start_the_system_script(system, plane);
+        if (plane != NULL) start_the_layout(system, plane);
         return CS2_KCS_DONE;
     }
 

@@ -227,6 +227,11 @@ int main(int argc, char **argv) {
                 (unsigned long long) cs2_kcs_instructions(system_script),
                 cs2_kcs_pc(system_script), running == 0 ? ", the script ended" : "");
 
+        const cs2_layout *layout = cs2_system_layout(system);
+        if (layout != NULL) {
+            cs2_log("the front end is %s.fes, in #%s", cs2_layout_name(layout),
+                    cs2_layout_state(layout));
+        }
         const cs2_kcs *flow = cs2_system_script(system);
         if (flow != NULL) {
             cs2_log("%s: %llu instructions, stopped at %#x", cs2_kcs_name(flow),
@@ -266,7 +271,7 @@ int main(int argc, char **argv) {
                 } else {
                     for (size_t i = 0; i < (size_t) width * height; i++) canvas[i] = 0xff000000u;
                 }
-                cs2_planes_draw(planes, canvas, width, height);
+                cs2_system_draw(system, canvas, width, height);
                 if (cs2_png_write(shot, canvas, width, height) != 0) {
                     fprintf(stderr, "%s\n", cs2_error());
                     result = 1;
