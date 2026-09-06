@@ -104,10 +104,10 @@ typedef enum {
 void cs2_layout_pointer(cs2_layout *layout, int x, int y);
 
 /* A click there: 1 the left button or a tap, 2 the right button. */
-void cs2_layout_click(cs2_layout *layout, int x, int y, int button);
+int cs2_layout_click(cs2_layout *layout, int x, int y, int button);
 
 /* The pad. */
-void cs2_layout_press(cs2_layout *layout, cs2_layout_key key);
+int cs2_layout_press(cs2_layout *layout, cs2_layout_key key);
 
 /*
  * The command channel: how the system script drives a screen it has started.

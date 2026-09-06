@@ -1409,9 +1409,9 @@ void cs2_layout_pointer(cs2_layout *layout, int x, int y) {
     set_focus(screen, hit(screen, x, y));
 }
 
-void cs2_layout_click(cs2_layout *layout, int x, int y, int button) {
+int cs2_layout_click(cs2_layout *layout, int x, int y, int button) {
     cs2_layout *screen = active(layout);
-    if (screen == NULL) return;
+    if (screen == NULL) return 0;
     int index = hit(screen, x, y);
     if (button == 2) {
         /* _CLICK_R_ is the layout language's "was there a right click", and a
@@ -1419,7 +1419,7 @@ void cs2_layout_click(cs2_layout *layout, int x, int y, int button) {
            all is still a right click, so it answers -1 rather than nothing. */
         screen->click_right = index >= 0 ? (int32_t) index + 1 : -1;
         fire(screen, index, "PUSH_R");
-        return;
+        return index >= 0;
     }
     set_focus(screen, index);
     screen->click_left = index >= 0 ? (int32_t) index + 1 : 0;
@@ -1432,27 +1432,33 @@ void cs2_layout_click(cs2_layout *layout, int x, int y, int button) {
                 cs2_fes_name(screen->fes), x, y);
     }
     fire(screen, index, "PUSH_L");
+    return index >= 0;
 }
 
-void cs2_layout_press(cs2_layout *layout, cs2_layout_key key) {
+int cs2_layout_press(cs2_layout *layout, cs2_layout_key key) {
     cs2_layout *screen = active(layout);
-    if (screen == NULL) return;
+    if (screen == NULL) return 0;
     switch (key) {
-    case CS2_LAYOUT_UP:      move_focus(screen, 0, -1); break;
-    case CS2_LAYOUT_DOWN:    move_focus(screen, 0, 1); break;
-    case CS2_LAYOUT_LEFT:    move_focus(screen, -1, 0); break;
-    case CS2_LAYOUT_RIGHT:   move_focus(screen, 1, 0); break;
+    case CS2_LAYOUT_UP:      move_focus(screen, 0, -1); return 1;
+    case CS2_LAYOUT_DOWN:    move_focus(screen, 0, 1); return 1;
+    case CS2_LAYOUT_LEFT:    move_focus(screen, -1, 0); return 1;
+    case CS2_LAYOUT_RIGHT:   move_focus(screen, 1, 0); return 1;
     case CS2_LAYOUT_CONFIRM:
-        /* Confirm with nothing focused is the pad arriving at the screen. */
+        /*
+         * Confirm with nothing focused is the pad arriving at the screen - and
+         * a screen with nothing to arrive at, which is what the message window
+         * is while a line is being read, has not taken the press at all.
+         */
         if (screen->focus < 0 || !reachable(screen, (size_t) screen->focus)) {
             move_focus(screen, 0, 1);
-            break;
+            return screen->focus >= 0;
         }
         screen->click_left = (int32_t) screen->focus + 1;
         fire(screen, screen->focus, "PUSH_L");
-        break;
+        return 1;
     case CS2_LAYOUT_CANCEL:
         screen->click_right = -1;
-        break;
+        return 0;
     }
+    return 0;
 }

@@ -29,6 +29,8 @@
 #define SYSTEM_VARIABLES 256
 #define SYSTEM_STRINGS 128
 #define NAMED_NUMBERS 512
+#define WAITING_LIMIT 4     /* the scripts that can be waiting for an event at once */
+#define EVENT_LIMIT 16      /* how many events one of them can be behind by */
 #define NAME_BYTES 32
 
 /*
@@ -97,6 +99,19 @@ struct cs2_system {
     } layouts[LAYOUT_LIMIT];
     size_t layout_count;
     cs2_kcs *flow;               /* the system script the layout has run */
+    /*
+     * The events each waiting script has still to be told about. A script
+     * registers itself the first time it waits (71), and an event is posted to
+     * every script that is waiting, not to the first one to ask: the game's own
+     * engine keeps the block address on the script (Grisaia2.bin, [script+0x70])
+     * rather than on the engine, so two scripts waiting at once each get it.
+     */
+    struct {
+        cs2_kcs *script;
+        uint32_t queue[EVENT_LIMIT][4];
+        size_t count;
+    } waiting[WAITING_LIMIT];
+    size_t waiting_count;
     int boot_override;           /* the runner was told which boot to force */
     system_variable system_variables[SYSTEM_VARIABLES];
     size_t system_variable_count;
@@ -266,6 +281,27 @@ void cs2_system_free(cs2_system *system) {
 void cs2_system_event(cs2_system *system, uint32_t event) {
     (void) event;
     if (system->scene_loaded) system->scene_step = 1;
+}
+
+/*
+ * An event, as the game's own scripts read one.
+ *
+ * It is a block of four words - a sender, a class, a word the class gives a
+ * meaning to, and a code - and it is what a layout's `send` statement writes
+ * ("send 0xffff0003 0 20" is meswnd.fes's Load button) and what the original
+ * engine's window turns a message into. sscript's frame is a loop around 71:
+ * every event is dispatched before the body of the frame runs.
+ */
+void cs2_system_post(cs2_system *system, uint32_t class_, uint32_t word, uint32_t code) {
+    if (system == NULL) return;
+    for (size_t i = 0; i < system->waiting_count; i++) {
+        if (system->waiting[i].count >= EVENT_LIMIT) continue;
+        uint32_t *block = system->waiting[i].queue[system->waiting[i].count++];
+        block[0] = 0;
+        block[1] = class_;
+        block[2] = word;
+        block[3] = code;
+    }
 }
 
 const cs2_scene *cs2_system_scenario(const cs2_system *system) {
@@ -541,32 +577,37 @@ static cs2_plane_state *plane_of(cs2_system *system, const uint8_t *arguments,
  * is a loop around this call: ask, and if nothing happened run one step of the
  * screen it is showing.
  */
-static int wait_for_the_reader(cs2_kcs *script,
+static int wait_for_the_reader(cs2_system *system, cs2_kcs *script, uint32_t *answer,
                                const uint8_t *arguments, uint32_t argument_size) {
     uint32_t where = arg(arguments, argument_size, 0);
-    cs2_kcs_suspend(script, where);
+
+    /* A script asking is a script waiting: this is where it says so. */
+    size_t which = 0;
+    while (which < system->waiting_count && system->waiting[which].script != script) which++;
+    if (which == system->waiting_count && which < WAITING_LIMIT) {
+        system->waiting[system->waiting_count].script = script;
+        system->waiting[system->waiting_count].count = 0;
+        system->waiting_count++;
+    }
+
     /*
-     * Nothing is handed back yet, and what used to be is worse than nothing.
+     * An event first, and without ending the frame. The game's frame is
      *
-     * An event is not a number, it is a block: sscript reads the word at
-     * offset 4 of it and switches on that, with more of the event at 8 and 12.
-     * Writing a bare 1 at offset 0 left the code reading as zero, and zero is
-     * the game's "load a save", so every tap while a scene was up answered
+     *     while (1) { if (71(&block)) dispatch(&block); else { body(); } }
      *
-     *     sscript load failed >
-     *
-     * rather than turning the page. The codes are the game's own: 0xFFFF0003
-     * and the rest are what a layout's "send" posts - meswnd.fes has thirteen
-     * of them, "send 0xffff0003 0 20" for load and so on - and 0, 1, 2 are the
-     * engine's own save and load. So events belong with "send", and until that
-     * is written this call says only that the frame is over, which is what the
-     * front end has always had from it.
-     *
-     * Every script waiting here would have to be told, not the first to ask:
-     * both of the game's scripts wait at this call at once, and the handler at
-     * 0x50F8D0 hands the address to a slot at [script + 0x70], which belongs
-     * to the script and not to the engine.
+     * so answering 1 drains one event and comes straight back here, and
+     * answering 0 is the frame boundary itself.
      */
+    if (which < system->waiting_count && system->waiting[which].count > 0) {
+        uint32_t *block = cs2_kcs_at(script, where, 16);
+        if (block != NULL) memcpy(block, system->waiting[which].queue[0], 16);
+        system->waiting[which].count--;
+        memmove(system->waiting[which].queue, system->waiting[which].queue + 1,
+                system->waiting[which].count * sizeof system->waiting[which].queue[0]);
+        *answer = 1;
+        return CS2_KCS_DONE_VALUE;
+    }
+    cs2_kcs_suspend(script, where);
     return CS2_KCS_DONE_YIELD_AGAIN;
 }
 
@@ -709,14 +750,38 @@ void cs2_system_pointer(cs2_system *system, int x, int y) {
     for (size_t i = system->layout_count; i-- > 0; ) cs2_layout_pointer(system->layouts[i].layout, x, y);
 }
 
+/*
+ * The reader's click, and what it means when no screen wanted it.
+ *
+ * A button of a running layout takes it first: that is how the title screen
+ * and the message window's own system buttons work. A click that lands on no
+ * button is the reader asking to go on, and the game's own scripts are told so
+ * with the class 0xFFFF0003 and the code 2 - the handler for it, at 0xD4C9D of
+ * sscript, is the one that takes skip and auto off and sets the flag the
+ * reading wait then consumes, and it is reached only while the reader is in a
+ * line (sub-states 4, 5 and 6 of [0x28234]).
+ */
+#define EVENT_SYSTEM 0xFFFF0003u   /* what the layouts' own `send` posts too */
+#define EVENT_ADVANCE 2u           /* go on: the reader has read this much */
+
 void cs2_system_click(cs2_system *system, int x, int y, int button) {
     if (system == NULL) return;
-    for (size_t i = system->layout_count; i-- > 0; ) cs2_layout_click(system->layouts[i].layout, x, y, button);
+    int taken = 0;
+    for (size_t i = system->layout_count; i-- > 0; ) {
+        if (cs2_layout_click(system->layouts[i].layout, x, y, button)) taken = 1;
+    }
+    if (!taken && button != 2) cs2_system_post(system, EVENT_SYSTEM, 0, EVENT_ADVANCE);
 }
 
 void cs2_system_press(cs2_system *system, cs2_layout_key key) {
     if (system == NULL) return;
-    for (size_t i = system->layout_count; i-- > 0; ) cs2_layout_press(system->layouts[i].layout, key);
+    int taken = 0;
+    for (size_t i = system->layout_count; i-- > 0; ) {
+        if (cs2_layout_press(system->layouts[i].layout, key)) taken = 1;
+    }
+    if (!taken && key == CS2_LAYOUT_CONFIRM) {
+        cs2_system_post(system, EVENT_SYSTEM, 0, EVENT_ADVANCE);
+    }
 }
 
 size_t cs2_system_layout_count(const cs2_system *system) {
@@ -928,7 +993,7 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE_VALUE;
 
     case 71:
-        return wait_for_the_reader(script, arguments, argument_size);
+        return wait_for_the_reader(system, script, answer, arguments, argument_size);
 
     /* 79: how big a plane is, as the floats the script works in. */
     case 79: {
@@ -1515,6 +1580,26 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     case 848:
     case 849:
         return CS2_KCS_DONE;
+
+    /*
+     * 437: may the reading go on - has the model layer at least this much left?
+     *
+     * 434, 436, 437 and 438 are one manager, Grisaia2.bin [0x8A8110], and what
+     * it manages is the game's model layer: the loader beside it (81) takes
+     * kx2, kx3 and veff, the formats the .kx2 archive holds. 434 gives it an
+     * unbounded budget (0x7FFFFFFF), 436 takes it to nothing, 438 spends one,
+     * and 437 (0x004A6070) asks whether the budget covers n.
+     *
+     * Its first line is the one that matters. The manager is built with a gate
+     * word (+0x1351C, out of the settings at +0xC9A0), and when that word is
+     * zero none of it - no worker, no list - is made and every ask answers 1.
+     * This engine draws no models, so the original's own answer for "it is not
+     * there" is the answer here, and it is the one the reading state machine
+     * waits on: sub-state 7 asks it before it goes on to the next line.
+     */
+    case 437:
+        *answer = 1;
+        return CS2_KCS_DONE_VALUE;
 
     /* 938: whether the game is being resumed rather than started. It is not. */
     case 938:

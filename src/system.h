@@ -37,6 +37,13 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
 void cs2_system_event(cs2_system *system, uint32_t event);
 
 /*
+ * An event for every script that is waiting for one: a class, a word the class
+ * gives a meaning to, and a code. This is what a layout's `send` writes and
+ * what the reader's click becomes.
+ */
+void cs2_system_post(cs2_system *system, uint32_t class_, uint32_t word, uint32_t code);
+
+/*
  * One frame of the engine's own side: the clock the scripts read, the layout a
  * started plane runs, and the system script that layout has started. Call it
  * once a frame, after the boot script has had its turn.
