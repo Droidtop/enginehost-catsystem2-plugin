@@ -227,7 +227,13 @@ int cs2_hg3_frame_count(const uint8_t *file, size_t size) {
     }
 }
 
-static int decode_frame(const uint8_t *file, size_t size, size_t first_tag, cs2_hg3_frame *out) {
+/*
+ * One frame. With `pixels_wanted` zero only the stdinfo tag is read, which is
+ * the frame's size and offset and is all a hit test needs; the packed image is
+ * then left alone, so asking where a button is costs nothing.
+ */
+static int decode_frame(const uint8_t *file, size_t size, size_t first_tag,
+                        cs2_hg3_frame *out, int pixels_wanted) {
     int32_t std[10];
     int have_std = 0;
     size_t image_tag = 0;
@@ -257,6 +263,17 @@ static int decode_frame(const uint8_t *file, size_t size, size_t first_tag, cs2_
     if (!have_std) {
         cs2_set_error("an HG-3 frame has no stdinfo tag");
         return -1;
+    }
+    if (!pixels_wanted) {
+        out->width = std[0];
+        out->height = std[1];
+        out->offset_x = std[3];
+        out->offset_y = std[4];
+        out->total_width = std[5];
+        out->total_height = std[6];
+        out->base_x = std[8];
+        out->base_y = std[9];
+        return 0;
     }
     if (!have_image) {
         cs2_set_error("an HG-3 frame has no image tag");
@@ -328,7 +345,7 @@ int cs2_hg3_decode(const uint8_t *file, size_t size, int frame_index, cs2_hg3_fr
     for (int index = 0; ; index++) {
         if (check(frame + 8, size, "HG-3 frame") != 0) return -1;
         uint32_t next = cs2_u32(file, size, frame);
-        if (index == frame_index) return decode_frame(file, size, frame + 8, out);
+        if (index == frame_index) return decode_frame(file, size, frame + 8, out, 1);
         if (next == 0) {
             cs2_set_error("this HG-3 image has no frame %d", frame_index);
             return -1;
@@ -338,15 +355,16 @@ int cs2_hg3_decode(const uint8_t *file, size_t size, int frame_index, cs2_hg3_fr
     }
 }
 
-int cs2_hg3_decode_id(const uint8_t *file, size_t size, int id, cs2_hg3_frame *out) {
-    memset(out, 0, sizeof *out);
+/* Where in the file the frame carrying an id begins: the word after the link. */
+static int frame_with_id(const uint8_t *file, size_t size, int id, size_t *first_tag) {
     size_t frame;
     if (first_frame(file, size, &frame) != 0) return -1;
     for (;;) {
         if (check(frame + 8, size, "HG-3 frame") != 0) return -1;
         uint32_t next = cs2_u32(file, size, frame);
         if ((int32_t) cs2_u32(file, size, frame + 4) == id) {
-            return decode_frame(file, size, frame + 8, out);
+            *first_tag = frame + 8;
+            return 0;
         }
         if (next == 0) {
             cs2_set_error("this HG-3 image has no frame with id %d", id);
@@ -355,6 +373,20 @@ int cs2_hg3_decode_id(const uint8_t *file, size_t size, int id, cs2_hg3_frame *o
         frame += next;
         if (check(frame, size, "HG-3 frame chain") != 0) return -1;
     }
+}
+
+int cs2_hg3_decode_id(const uint8_t *file, size_t size, int id, cs2_hg3_frame *out) {
+    memset(out, 0, sizeof *out);
+    size_t first_tag;
+    if (frame_with_id(file, size, id, &first_tag) != 0) return -1;
+    return decode_frame(file, size, first_tag, out, 1);
+}
+
+int cs2_hg3_bounds_id(const uint8_t *file, size_t size, int id, cs2_hg3_frame *out) {
+    memset(out, 0, sizeof *out);
+    size_t first_tag;
+    if (frame_with_id(file, size, id, &first_tag) != 0) return -1;
+    return decode_frame(file, size, first_tag, out, 0);
 }
 
 void cs2_hg3_frame_free(cs2_hg3_frame *frame) {

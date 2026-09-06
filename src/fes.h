@@ -19,8 +19,9 @@
  * The text is sections introduced by a #WORD line. Three of them are tables and
  * are read here: #DEFINE names the objects by kind and count, #OBJECT is a
  * column-headed table over them ("#OBJECT FILE ID.0 PL DISP PRI" and then one
- * line per object), and #SUBCOMMAND names the motions. Every other section is a
- * run of script lines, kept as they lie for layout.c to run.
+ * line per object, the KEYBLOCK column among them saying where the pad finds a
+ * button), and #SUBCOMMAND names the motions. Every other section is a run of
+ * script lines, kept as they lie for layout.c to run.
  *
  * Format read from the game's own files; see /root/re/fes/FES-FORMAT.md.
  */
@@ -58,6 +59,14 @@ typedef struct {
     int priority;
     int disp;
     int enable;
+    /*
+     * KEYBLOCK: where the pad finds this button. A layout's buttons are laid
+     * out in one or more grids - "btn_j[0] 0,0,0" is grid 0, column 0, row 0 -
+     * and the d-pad walks a grid; -1 for a thing the pad never reaches.
+     */
+    int block;
+    int column;
+    int row;
 } cs2_fes_object;
 
 typedef struct cs2_fes cs2_fes;
