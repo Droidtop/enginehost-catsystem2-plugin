@@ -416,6 +416,18 @@ static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
     if (system->layout == NULL) cs2_log("%s", cs2_error());
 }
 
+void cs2_system_pointer(cs2_system *system, int x, int y) {
+    if (system != NULL) cs2_layout_pointer(system->layout, x, y);
+}
+
+void cs2_system_click(cs2_system *system, int x, int y, int button) {
+    if (system != NULL) cs2_layout_click(system->layout, x, y, button);
+}
+
+void cs2_system_press(cs2_system *system, cs2_layout_key key) {
+    if (system != NULL) cs2_layout_press(system->layout, key);
+}
+
 const cs2_layout *cs2_system_layout(const cs2_system *system) {
     return system == NULL ? NULL : system->layout;
 }
