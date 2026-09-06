@@ -27,8 +27,6 @@
 #define VARIABLE_BYTES 0x10000u
 #define SYSTEM_VARIABLES 256
 #define SYSTEM_STRINGS 128
-#define SCENE_COMMANDS 96
-#define WORD_BYTES 256
 #define STRING_BYTES 260
 
 /*
@@ -56,18 +54,6 @@ typedef struct {
     char value[STRING_BYTES];
 } system_string;
 
-/*
- * A scene-script command the system script has claimed for itself. The scenario
- * interpreter plays a scene script; the words the system script registered
- * (517) it hands back by number (326) so the script can carry them out - the
- * title screen, save and load, the selection screens are all commands in a
- * scene script that the system script answers.
- */
-typedef struct {
-    char name[32];
-    uint32_t id;
-} scene_command;
-
 struct cs2_system {
     cs2_files *files;
     cs2_planes *planes;
@@ -85,8 +71,6 @@ struct cs2_system {
     int scene_step;              /* the scene has something to run this frame */
     int boot_type;
     char boot_scenario[128];
-    scene_command commands[SCENE_COMMANDS];
-    size_t command_count;
     cs2_layout *layout;          /* the .fes a started plane is running */
     cs2_plane layout_plane;
     cs2_kcs *flow;               /* the system script the layout has run */
@@ -139,26 +123,41 @@ void cs2_system_set_variable(cs2_system *system, uint32_t key, uint32_t value) {
  * The words of one line of the scenario, as the system script counts them: the
  * command first and its arguments after, separated by spaces.
  */
-static int scene_word(cs2_system *system, uint32_t line, uint32_t index,
-                      char *out, size_t out_size) {
-    out[0] = 0;
+/*
+ * Where a word of the scenario is. The system script addresses a scene script
+ * as (line, word): a line is a run of words, and the file says where each run
+ * begins, so this is the one place the two are put together.
+ */
+static int scene_word(cs2_system *system, int32_t line, int32_t index, size_t *at) {
     if (!system->scene_loaded) return -1;
-    const char *text = cs2_scene_line(system->scene, line, NULL);
-    if (text == NULL) return -1;
-    for (uint32_t at = 0; ; at++) {
-        while (*text == ' ' || *text == '\t') text++;
-        if (*text == 0) return -1;
-        const char *end = text;
-        while (*end != 0 && *end != ' ' && *end != '\t') end++;
-        if (at == index) {
-            size_t length = (size_t) (end - text);
-            if (length + 1 > out_size) length = out_size - 1;
-            memcpy(out, text, length);
-            out[length] = 0;
-            return 0;
-        }
-        text = end;
+    size_t first = 0, count = 0;
+    if (line < 0 || cs2_scene_line_words(system->scene, (size_t) line, &first, &count) != 0) {
+        return -1;
     }
+    if (index < 0 || (size_t) index >= count) return -1;
+    *at = first + (size_t) index;
+    return 0;
+}
+
+/*
+ * What kind of word it is, as the engine answers it: the word's own type byte
+ * out of the file - a piece of the message, a name, a pause, a page, a command
+ * - and -1 where there is no such word. A line asked for with a negative word
+ * answers how many words it holds, and a negative line answers how many lines
+ * the script has, which is how the system script measures a scenario.
+ */
+static int32_t scene_kind(cs2_system *system, int32_t line, int32_t index) {
+    if (!system->scene_loaded) return -1;
+    size_t lines = cs2_scene_line_count(system->scene);
+    if (line < 0) return (int32_t) lines;
+    if ((size_t) line >= lines) return -1;
+    size_t first = 0, count = 0;
+    if (cs2_scene_line_words(system->scene, (size_t) line, &first, &count) != 0) return -1;
+    if (index < 0) return (int32_t) count;
+    if ((size_t) index >= count) return -1;
+    unsigned type = 0;
+    if (cs2_scene_word(system->scene, first + (size_t) index, &type) == NULL) return -1;
+    return (int32_t) type;
 }
 
 cs2_system *cs2_system_new(cs2_files *files, int width, int height) {
@@ -785,49 +784,38 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     }
 
     /*
-     * 517: the system script claims a scene-script command for itself, by name
-     * and by number. Forty-odd of them - title, select, movie, cgreg, place -
-     * are the screens the game's front end is made of.
+     * 517: the system script tells the engine a scene-script command's name
+     * and its own number for it. Nothing here reads that back yet: what 326
+     * answers is the word's own type byte out of the file, not a number from
+     * this table, so keeping the table would be keeping something nothing
+     * asks. It goes back the day something does.
      */
-    case 517: {
-        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
-        uint32_t id = arg(arguments, argument_size, 2);
-        if (name != NULL && system->command_count < SCENE_COMMANDS) {
-            scene_command *fresh = &system->commands[system->command_count++];
-            snprintf(fresh->name, sizeof fresh->name, "%s", name);
-            fresh->id = id;
-        }
+    case 517:
         return CS2_KCS_DONE;
-    }
 
     /*
-     * 326: which of those commands the word at this place in the scenario is,
-     * and -1 when it is not one of them. 327 is the same word as text. Between
-     * them the system script reads the scene script it put on the screen.
+     * 326 and 327: how the system script reads the scene script it put on the
+     * screen. 326 says what kind the word at (line, word) is and 327 hands
+     * back its text. Between them the script walks the scenario a word at a
+     * time, and -1 from 326 is what tells it there is no such word.
      */
-    case 326: {
-        char word[WORD_BYTES];
-        *answer = 0xffffffffu;
-        if (scene_word(system, arg(arguments, argument_size, 1),
-                       arg(arguments, argument_size, 2), word, sizeof word) != 0) {
-            return CS2_KCS_DONE_VALUE;
-        }
-        for (size_t i = 0; i < system->command_count; i++) {
-            if (cs2_ieq(system->commands[i].name, word)) {
-                *answer = system->commands[i].id;
-                break;
-            }
-        }
+    case 326:
+        *answer = (uint32_t) scene_kind(system,
+                                        (int32_t) arg(arguments, argument_size, 1),
+                                        (int32_t) arg(arguments, argument_size, 2));
         return CS2_KCS_DONE_VALUE;
-    }
     case 327: {
-        char word[WORD_BYTES];
         uint32_t destination = arg(arguments, argument_size, 1);
-        scene_word(system, arg(arguments, argument_size, 2),
-                   arg(arguments, argument_size, 3), word, sizeof word);
-        size_t length = strlen(word) + 1;
-        char *at = cs2_kcs_at(script, destination, (uint32_t) length);
-        if (at != NULL) memcpy(at, word, length);
+        const char *text = "";
+        size_t at = 0;
+        if (scene_word(system, (int32_t) arg(arguments, argument_size, 2),
+                       (int32_t) arg(arguments, argument_size, 3), &at) == 0) {
+            const char *word = cs2_scene_word(system->scene, at, NULL);
+            if (word != NULL) text = word;
+        }
+        size_t length = strlen(text) + 1;
+        char *out = cs2_kcs_at(script, destination, (uint32_t) length);
+        if (out != NULL) memcpy(out, text, length);
         *answer = destination;
         return CS2_KCS_DONE_VALUE;
     }
@@ -854,7 +842,8 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE;
 
     /* 332: how many lines a scene script holds, which is how far it can be
-     * wound on. */
+     * wound on. Lines, not words: it is the same number a scenario's line
+     * numbers are counted against. */
     case 332:
         *answer = (uint32_t) cs2_scene_line_count(system->scene);
         return CS2_KCS_DONE_VALUE;

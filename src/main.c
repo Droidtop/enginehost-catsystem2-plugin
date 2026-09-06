@@ -331,7 +331,7 @@ int main(int argc, char **argv) {
         const cs2_scene *scenario = cs2_system_scenario(system);
         if (scenario != NULL) {
             cs2_log("the scenario is %s, %zu/%zu", cs2_scene_path(scenario),
-                    cs2_scene_cursor(scenario), cs2_scene_line_count(scenario));
+                    cs2_scene_cursor(scenario), cs2_scene_word_count(scenario));
         }
         if (shot != NULL) {
             uint32_t *canvas = calloc((size_t) width * height, sizeof *canvas);
@@ -455,7 +455,7 @@ int main(int argc, char **argv) {
     char status[512];
     const char *title = cs2_startup_value(startup, "APP/title");
     snprintf(status, sizeof status, "%s  -  %s  %zu/%zu", title == NULL ? "CatSystem2" : title,
-             cs2_scene_path(scene), cs2_scene_cursor(scene), cs2_scene_line_count(scene));
+             cs2_scene_path(scene), cs2_scene_cursor(scene), cs2_scene_word_count(scene));
 
     int result = 0;
     if (shot != NULL) {
@@ -480,7 +480,7 @@ int main(int argc, char **argv) {
         for (int running = texture != NULL; running; ) {
             snprintf(status, sizeof status, "%s  -  %s  %zu/%zu",
                      title == NULL ? "CatSystem2" : title, cs2_scene_path(scene),
-                     cs2_scene_cursor(scene), cs2_scene_line_count(scene));
+                     cs2_scene_cursor(scene), cs2_scene_word_count(scene));
             const uint32_t *canvas = cs2_render_frame(render, scene, status);
             SDL_UpdateTexture(texture, NULL, canvas, width * (int) sizeof *canvas);
             SDL_RenderClear(sdl);
