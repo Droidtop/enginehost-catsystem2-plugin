@@ -54,6 +54,15 @@ typedef struct {
     char file[64];               /* FILE: the image or sound it draws from */
     char plane[40];              /* PL: the plane it is drawn on */
     int ids[CS2_FES_IDS];        /* ID.0..ID.5, -1 where the table has none */
+    /*
+     * POS2 and SIZE2 are sometimes not numbers but a picture: "$str900:10" is
+     * frame 10 of the file named by the game's numbered string 900, and the
+     * object's place and size are that frame's own offset and size. The
+     * message window is laid out entirely this way - where its text goes is
+     * where the window picture says it goes - so the reference is kept as
+     * written and resolved when the strings are known.
+     */
+    char box_from[48];
     int x, y;                    /* POS, inside its plane */
     int base_x, base_y;          /* BASE */
     int width, height;           /* SIZE */

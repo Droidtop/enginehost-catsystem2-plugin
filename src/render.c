@@ -1,6 +1,5 @@
 #include "render.h"
 
-#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,29 +28,6 @@ struct cs2_render {
     cs2_font *small_font;
 };
 
-/* The game's own font, whichever face it ships beside its archives. */
-static char *find_font(const char *root) {
-    DIR *directory = opendir(root);
-    if (directory == NULL) return NULL;
-    char best[256] = "";
-    for (struct dirent *item; (item = readdir(directory)) != NULL; ) {
-        size_t length = strlen(item->d_name);
-        if (length < 5 || length >= sizeof best) continue;
-        const char *suffix = item->d_name + length - 4;
-        if (!cs2_ieq(suffix, ".ttf") && !cs2_ieq(suffix, ".otf") && !cs2_ieq(suffix, ".ttc")) continue;
-        if (best[0] == '\0' || strcmp(item->d_name, best) < 0) {
-            memcpy(best, item->d_name, length + 1);
-        }
-    }
-    closedir(directory);
-    if (best[0] == '\0') return NULL;
-    size_t size = strlen(root) + strlen(best) + 2;
-    char *path = malloc(size);
-    if (path == NULL) return NULL;
-    snprintf(path, size, "%s/%s", root, best);
-    return path;
-}
-
 cs2_render *cs2_render_new(cs2_files *files, int width, int height) {
     if (width <= 0 || height <= 0 || width > 8192 || height > 8192) {
         cs2_set_error("cannot draw a %dx%d screen", width, height);
@@ -71,14 +47,11 @@ cs2_render *cs2_render_new(cs2_files *files, int width, int height) {
         cs2_set_error("out of memory");
         return NULL;
     }
-    char *path = find_font(cs2_files_root(files));
-    if (path == NULL) {
+    const char *root = cs2_files_root(files);
+    render->font = cs2_font_open_beside(root, 30);
+    render->small_font = cs2_font_open_beside(root, 19);
+    if (render->font == NULL) {
         cs2_log("the game ships no font beside its archives; no text will be drawn");
-    } else {
-        render->font = cs2_font_open(path, 30);
-        render->small_font = cs2_font_open(path, 19);
-        if (render->font == NULL) cs2_log("could not read the game's font %s", path);
-        free(path);
     }
     return render;
 }

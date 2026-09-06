@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "cs2.h"
+#include "font.h"
 #include "hg3.h"
 
 /*
@@ -27,6 +28,7 @@
 #define CALL_DEPTH 16
 #define LINE_BUDGET 20000
 #define COMMANDS_SAID 48
+#define FONTS 4
 
 typedef struct {
     int section;
@@ -65,6 +67,8 @@ struct object_state {
     int drawing;
     int frames_each;             /* frames a character takes; 0 is at once */
     int frames_left;
+    int point_size;              /* the height its face is drawn at */
+    uint32_t colour;
 };
 
 struct cs2_layout {
@@ -100,6 +104,18 @@ struct cs2_layout {
     int said_count;
     int at_index;            /* what [@] means: the button whose event is running */
     int went;                /* the script has just changed state with next */
+
+    /*
+     * The game's own face, at whatever height the STRING objects on this
+     * screen ask for. A screen draws its text in one or two sizes - the line
+     * and the speaker's name - so a small set is enough and they are opened
+     * as they are asked for.
+     */
+    struct {
+        int point_size;
+        cs2_font *font;
+    } fonts[FONTS];
+    int font_count;
 };
 
 /* --------------------------------------------------------------- the values */
@@ -119,6 +135,9 @@ static object_state *object_of(cs2_layout *layout, const char *token, size_t *fr
 static int32_t expression(reader *reader);
 static int subscript(cs2_layout *layout, const char *bracket);
 static int reachable(const cs2_layout *layout, size_t index);
+static void ensure_boxes(cs2_layout *layout);
+static int object_rect(cs2_layout *layout, const object_state *object,
+                       int *x, int *y, int *width, int *height);
 
 /*
  * Which of ID.0.. an object is showing. setid picks one, and a button's two
@@ -159,15 +178,27 @@ static int32_t primary(reader *r) {
         r->at++;
         return r->layout->at_index;
     }
-    if (c == '$') {
+    if (c == '$' || c == '\\') {
+        /*
+         * Which variable is itself an expression when it is bracketed:
+         * meswnd.fes walks its eight buttons with "\\(200+\\0)" over one local
+         * rather than writing the eight lines out, the same way a subscript
+         * does. Reading the digits gave variable zero for every one of them.
+         */
         r->at++;
-        int number = (int) strtol(r->at, (char **) &r->at, 10);
-        return r->layout->host.flag == NULL ? 0
-             : r->layout->host.flag(r->layout->host.context, number);
-    }
-    if (c == '\\') {
-        r->at++;
-        int number = (int) strtol(r->at, (char **) &r->at, 10);
+        int number;
+        if (*r->at == '(') {
+            r->at++;
+            number = (int) expression(r);
+            skip_space(r);
+            if (*r->at == ')') r->at++;
+        } else {
+            number = (int) strtol(r->at, (char **) &r->at, 10);
+        }
+        if (c == '$') {
+            return r->layout->host.flag == NULL ? 0
+                 : r->layout->host.flag(r->layout->host.context, number);
+        }
         if (number < 0 || number >= LOCALS) return 0;
         return r->layout->locals[number];
     }
@@ -422,16 +453,86 @@ static int string_command(cs2_layout *layout, object_state *object,
     }
     if (strcmp(command, "layout") == 0) {
         char what[32] = "";
-        int value = 0;
-        if (sscanf(rest, "%31s %d", what, &value) == 2
-            && strcmp(what, "frame") == 0) {
-            object->frames_each = value < 0 ? 0 : value;
+        int read = 0;
+        if (sscanf(rest, "%31s%n", what, &read) < 1) return 1;
+        const char *values = rest + read;
+        int a = 0, b = 0, c = 0, d = 0, e = 0;
+        int given = sscanf(values, "%d %d %d %d %d", &a, &b, &c, &d, &e);
+        if (strcmp(what, "frame") == 0 && given >= 1) {
+            object->frames_each = a < 0 ? 0 : a;
+        } else if (strcmp(what, "size") == 0 && given >= 1) {
+            /*
+             * One number, or five. The five are a scale the reader can pick
+             * from and the middle of them is the ordinary size: four of the
+             * layouts write the same box both ways - "str layout size 24" and
+             * "str layout size 18 22 24 36 42", "name layout size 22" and
+             * "name layout size 11 11 22 22 22" - and in every one of them
+             * the single number is the third of the five.
+             */
+            object->point_size = given >= 5 ? c : a;
+        } else if (strcmp(what, "color") == 0 && given >= 3) {
+            /* Nine numbers: three colours. The first is the text itself. */
+            object->colour = 0xff000000u | ((uint32_t) (a & 0xff) << 16)
+                           | ((uint32_t) (b & 0xff) << 8) | (uint32_t) (c & 0xff);
         }
+        (void) d;
+        (void) e;
         return 1;
     }
     /* apendmark, userfont, userfontobj, pos2, getpos2, the colours and the
        margins are how the window is dressed, not what it says. */
     return 1;
+}
+
+/* The game's own face at one height, opened the first time a screen wants it. */
+static const cs2_font *font_at(cs2_layout *layout, int point_size) {
+    if (point_size <= 0) return NULL;
+    for (int i = 0; i < layout->font_count; i++) {
+        if (layout->fonts[i].point_size == point_size) return layout->fonts[i].font;
+    }
+    if (layout->font_count >= FONTS) return NULL;
+    cs2_font *font = cs2_font_open_beside(cs2_files_root(layout->files), point_size);
+    if (font == NULL) {
+        cs2_log("%s.fes has text to draw and this game ships no font beside its archives",
+                cs2_fes_name(layout->fes));
+    }
+    layout->fonts[layout->font_count].point_size = point_size;
+    layout->fonts[layout->font_count].font = font;
+    layout->font_count++;
+    return font;
+}
+
+/*
+ * What a command was given. Not numbers: "pl_base disp \\52" is how the message
+ * window is shown and "btn_sys[\\0] setid 2" is how its buttons are lit, so an
+ * argument is an expression like everything else in these files. Reading them
+ * as digits made every one of those zero, and a message window whose plane is
+ * told "disp 0" draws nothing at all.
+ *
+ * One expression per word: the files write their arguments a word apart, and
+ * taking them one at a time keeps "fade 16 -1 255" three arguments rather than
+ * a subtraction.
+ */
+static int arguments_of(cs2_layout *layout, const char *rest, int *a, int *b, int *c) {
+    int *into[3] = { a, b, c };
+    int given = 0;
+    while (given < 3) {
+        while (*rest == ' ' || *rest == '\t') rest++;
+        if (*rest == 0) break;
+        char word[64];
+        size_t length = 0;
+        while (rest[length] != 0 && rest[length] != ' ' && rest[length] != '\t'
+               && length + 1 < sizeof word) {
+            word[length] = rest[length];
+            length++;
+        }
+        word[length] = 0;
+        rest += length;
+        reader r = { layout, word };
+        *into[given] = (int) expression(&r);
+        given++;
+    }
+    return given;
 }
 
 /*
@@ -450,7 +551,7 @@ static int object_command(cs2_layout *layout, const char *line) {
     if (object_of(layout, token, &from) == NULL) return 0;
     const char *rest = line + read;
     int a = 0, b = 0, c = 0;
-    int given = sscanf(rest, "%d %d %d", &a, &b, &c);
+    int given = arguments_of(layout, rest, &a, &b, &c);
 
     from = 0;
     object_state *object;
@@ -789,6 +890,7 @@ void cs2_layout_free(cs2_layout *layout) {
     cs2_layout_free(layout->child);
     cs2_fes_free(layout->fes);
     for (size_t i = 0; i < layout->object_count; i++) free(layout->objects[i].text);
+    for (int i = 0; i < layout->font_count; i++) cs2_font_free(layout->fonts[i].font);
     free(layout->objects);
     free(layout);
 }
@@ -882,9 +984,73 @@ static const object_state *plane_of(cs2_layout *layout, const char *name) {
     return NULL;
 }
 
+/*
+ * The text a STRING object is holding, as far as it has been revealed, inside
+ * the box the window picture gives it. Lines are broken at spaces where the
+ * next word would not fit, and at the "\n" the message format carries.
+ */
+static void draw_the_text(cs2_layout *layout, const object_state *object,
+                          uint32_t *canvas, int width, int height) {
+    if (object->text == NULL || object->shown == 0) return;
+    const cs2_font *font = font_at(layout, object->point_size);
+    if (font == NULL) return;
+
+    ensure_boxes(layout);
+    int at_x = 0, at_y = 0, box_width = 0, box_height = 0;
+    if (object_rect(layout, object, &at_x, &at_y, &box_width, &box_height) != 0) {
+        return;
+    }
+    (void) box_height;
+
+    char shown[4096];
+    size_t take = object->shown < sizeof shown - 1 ? object->shown : sizeof shown - 1;
+    memcpy(shown, object->text, take);
+    shown[take] = 0;
+
+    uint32_t colour = object->colour == 0 ? 0xffffffffu : object->colour;
+    int line_height = cs2_font_height(font);
+    int y = at_y;
+    char line[1024];
+    size_t used = 0;
+    size_t break_at = 0;                 /* the last space the line could end at */
+    for (size_t i = 0; i <= take; i++) {
+        char ch = shown[i];
+        int end_of_line = ch == 0 || ch == '\n';
+        if (!end_of_line) {
+            if (used + 2 >= sizeof line) end_of_line = 1;
+            else {
+                line[used] = ch;
+                line[used + 1] = 0;
+                if (ch == ' ') break_at = used;
+                if (box_width > 0 && cs2_font_measure(font, line) > box_width && break_at > 0) {
+                    /* Put the word that did not fit on the next line. */
+                    i -= used - break_at;
+                    used = break_at;
+                    line[used] = 0;
+                    break_at = 0;
+                    end_of_line = 1;
+                } else {
+                    used++;
+                }
+            }
+        }
+        if (!end_of_line) continue;
+        line[used] = 0;
+        if (used > 0) cs2_font_draw(font, canvas, width, height, at_x, y, line, colour);
+        y += line_height;
+        used = 0;
+        break_at = 0;
+        if (ch == 0) break;
+    }
+}
+
 static void draw_one(cs2_layout *layout, const object_state *object,
                      uint32_t *canvas, int width, int height) {
     if (object->deleted || object->declared.disp == 0) return;
+    if (object->declared.kind == CS2_FES_STRING) {
+        draw_the_text(layout, object, canvas, width, height);
+        return;
+    }
     if (object->declared.kind != CS2_FES_IMAGE && object->declared.kind != CS2_FES_BUTTON) return;
     if (object->declared.file[0] == 0) return;
     int id = object->declared.ids[shown_id(object)];
@@ -963,7 +1129,43 @@ void cs2_layout_draw(cs2_layout *layout, uint32_t *canvas, int width, int height
  * ids it is showing, where its plane has been moved to - can change every
  * frame and is worked out at the moment of the question.
  */
+/*
+ * "$str900:10" is not a place, it is a picture: frame 10 of whatever the
+ * game's numbered string 900 holds, which for the message window is
+ * sys_mwnd.hg3. So an object laid out that way is given that file and that
+ * frame, and then it is an object with a picture like any other - its place
+ * and its size are the frame's own offset and size, which is the same rule
+ * every button on the title screen is found by.
+ */
+static void resolve_the_box(cs2_layout *layout, object_state *object) {
+    const char *from = object->declared.box_from;
+    if (from[0] == 0 || object->declared.file[0] != 0) return;
+    if (strncmp(from, "$str", 4) != 0) return;
+    const char *colon = strchr(from, ':');
+    if (colon == NULL || layout->host.string == NULL) return;
+    const char *name = layout->host.string(layout->host.context, atoi(from + 4));
+    if (name == NULL || name[0] == 0) return;
+    snprintf(object->declared.file, sizeof object->declared.file, "%s", name);
+    /* The tables name the file with its suffix and everything else without. */
+    size_t length = strlen(object->declared.file);
+    if (length > 4 && cs2_ieq(object->declared.file + length - 4, ".hg3")) {
+        object->declared.file[length - 4] = 0;
+    }
+    object->declared.ids[0] = atoi(colon + 1);
+    /*
+     * The strings are the game's and they are set while the game runs, so a
+     * reference can be nothing the first time it is looked at and a picture
+     * the next. Whatever was read of this object before is out of date.
+     */
+    object->boxes_read = 0;
+    cs2_log("%s.fes: %s is %s frame %d", cs2_fes_name(layout->fes),
+            object->declared.name, object->declared.file, object->declared.ids[0]);
+}
+
 static void ensure_boxes(cs2_layout *layout) {
+    for (size_t i = 0; i < layout->object_count; i++) {
+        resolve_the_box(layout, &layout->objects[i]);
+    }
     for (size_t i = 0; i < layout->object_count; i++) {
         if (layout->objects[i].boxes_read) continue;
         char name[64];

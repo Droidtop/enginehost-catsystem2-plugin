@@ -190,11 +190,14 @@ static void set_column(cs2_fes_object *object, const char *column, const char *v
     } else if (strcmp(column, "IDN") == 0) {
         object->ids[0] = atoi(value);
     } else if (strcmp(column, "POS") == 0 || strcmp(column, "POS2") == 0) {
-        pair(value, &object->x, &object->y);
+        if (value[0] == '$') snprintf(object->box_from, sizeof object->box_from, "%s", value);
+        else pair(value, &object->x, &object->y);
     } else if (strcmp(column, "BASE") == 0) {
         pair(value, &object->base_x, &object->base_y);
     } else if (strcmp(column, "SIZE") == 0 || strcmp(column, "SIZE2") == 0) {
-        pair(value, &object->width, &object->height);
+        /* The same picture answers both, so POS2 has already named it. */
+        if (value[0] == '$') snprintf(object->box_from, sizeof object->box_from, "%s", value);
+        else pair(value, &object->width, &object->height);
     } else if (strcmp(column, "PRI") == 0) {
         object->priority = atoi(value);
     } else if (strcmp(column, "DISP") == 0) {

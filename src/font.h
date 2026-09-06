@@ -16,6 +16,13 @@ typedef struct cs2_font cs2_font;
 
 /* Opens a TrueType or OpenType file at a pixel height. NULL when it will not open. */
 cs2_font *cs2_font_open(const char *path, int pixel_height);
+
+/*
+ * The game's own face, whichever one it ships in its folder beside the
+ * archives, at a pixel height. Everything that draws the game's text opens it
+ * this way, so there is one answer to "which font is this game's".
+ */
+cs2_font *cs2_font_open_beside(const char *root, int pixel_height);
 void cs2_font_free(cs2_font *font);
 
 int cs2_font_height(const cs2_font *font);
