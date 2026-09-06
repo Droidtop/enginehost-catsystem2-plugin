@@ -1,3 +1,6 @@
+#include <dirent.h>
+#include <stdio.h>
+
 #include "font.h"
 
 #include <stdlib.h>
@@ -154,4 +157,25 @@ int cs2_font_draw(const cs2_font *font, uint32_t *canvas, int width, int height,
         previous = code;
     }
     return line_height;
+}
+
+/* The game's own font, whichever face it ships beside its archives. */
+cs2_font *cs2_font_open_beside(const char *root, int pixel_height) {
+    DIR *directory = root == NULL ? NULL : opendir(root);
+    if (directory == NULL) return NULL;
+    char best[256] = "";
+    for (struct dirent *item; (item = readdir(directory)) != NULL; ) {
+        size_t length = strlen(item->d_name);
+        if (length < 5 || length >= sizeof best) continue;
+        const char *suffix = item->d_name + length - 4;
+        if (!cs2_ieq(suffix, ".ttf") && !cs2_ieq(suffix, ".otf") && !cs2_ieq(suffix, ".ttc")) continue;
+        if (best[0] == '\0' || strcmp(item->d_name, best) < 0) {
+            memcpy(best, item->d_name, length + 1);
+        }
+    }
+    closedir(directory);
+    if (best[0] == '\0') return NULL;
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s", root, best);
+    return cs2_font_open(path, pixel_height);
 }
