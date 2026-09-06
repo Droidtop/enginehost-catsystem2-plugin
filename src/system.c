@@ -26,6 +26,8 @@
 #define VARIABLE_BYTES 0x10000u
 #define SYSTEM_VARIABLES 256
 #define SYSTEM_STRINGS 128
+#define SCENE_COMMANDS 96
+#define WORD_BYTES 256
 #define STRING_BYTES 260
 
 /*
@@ -53,6 +55,18 @@ typedef struct {
     char value[STRING_BYTES];
 } system_string;
 
+/*
+ * A scene-script command the system script has claimed for itself. The scenario
+ * interpreter plays a scene script; the words the system script registered
+ * (517) it hands back by number (326) so the script can carry them out - the
+ * title screen, save and load, the selection screens are all commands in a
+ * scene script that the system script answers.
+ */
+typedef struct {
+    char name[32];
+    uint32_t id;
+} scene_command;
+
 struct cs2_system {
     cs2_files *files;
     cs2_planes *planes;
@@ -70,6 +84,8 @@ struct cs2_system {
     int scene_step;              /* the scene has something to run this frame */
     int boot_type;
     char boot_scenario[128];
+    scene_command commands[SCENE_COMMANDS];
+    size_t command_count;
     cs2_kcs *flow;               /* the system script a started plane runs */
     cs2_plane flow_plane;
     system_variable system_variables[SYSTEM_VARIABLES];
@@ -114,6 +130,32 @@ const char *cs2_system_string(cs2_system *system, uint32_t number) {
 void cs2_system_set_variable(cs2_system *system, uint32_t key, uint32_t value) {
     uint32_t *slot = system_variable_at(system, key, 1);
     if (slot != NULL) *slot = value;
+}
+
+/*
+ * The words of one line of the scenario, as the system script counts them: the
+ * command first and its arguments after, separated by spaces.
+ */
+static int scene_word(cs2_system *system, uint32_t line, uint32_t index,
+                      char *out, size_t out_size) {
+    out[0] = 0;
+    if (!system->scene_loaded) return -1;
+    const char *text = cs2_scene_line(system->scene, line, NULL);
+    if (text == NULL) return -1;
+    for (uint32_t at = 0; ; at++) {
+        while (*text == ' ' || *text == '\t') text++;
+        if (*text == 0) return -1;
+        const char *end = text;
+        while (*end != 0 && *end != ' ' && *end != '\t') end++;
+        if (at == index) {
+            size_t length = (size_t) (end - text);
+            if (length + 1 > out_size) length = out_size - 1;
+            memcpy(out, text, length);
+            out[length] = 0;
+            return 0;
+        }
+        text = end;
+    }
 }
 
 cs2_system *cs2_system_new(cs2_files *files, int width, int height) {
@@ -209,6 +251,27 @@ int cs2_system_finished(const cs2_system *system) {
 const cs2_kcs *cs2_system_script(const cs2_system *system) {
     return system == NULL ? NULL : system->flow;
 }
+
+/*
+ * The return codes of the engine functions the game asks for and this engine
+ * has not written yet, read off each handler in Grisaia2.bin with
+ * /root/re/kcs/gcallret.py. They are here rather than guessed because the code
+ * is what keeps the script's stack straight: with them a run walks the whole
+ * front end and names everything it wanted, and without them it stops at the
+ * first function whose answer nobody takes.
+ */
+static const struct {
+    uint16_t id;
+    uint8_t code;
+} unwritten_return_codes[] = {
+    {35, 2},   {78, 2},   {84, 2},   {85, 2},   {101, 2},  {143, 0},  {156, 2},
+    {207, 2},  {238, 1},  {244, 1},  {294, 1},  {301, 2},  {311, 1},  {315, 1},
+    {316, 1},  {323, 1},  {328, 1},  {329, 1},  {342, 2},  {344, 2},  {345, 2},
+    {389, 1},  {402, 2},  {404, 2},  {419, 1},  {434, 2},  {455, 2},  {458, 2},
+    {466, 2},  {515, 1},  {542, 2},  {572, 2},  {586, 2},  {593, 2},  {594, 1},
+    {630, 2},  {633, 1},  {645, 2},  {646, 1},  {696, 1},  {739, 2},  {741, 1},
+    {785, 2},  {790, 1},  {863, 1},  {866, 1},  {925, 1}
+};
 
 /* ------------------------------------------------------- reading arguments */
 
@@ -366,7 +429,8 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         size_t length = strlen(value) + 1;
         char *at = cs2_kcs_at(script, destination, (uint32_t) length);
         if (at != NULL) memcpy(at, value, length);
-        return CS2_KCS_DONE;
+        *answer = destination;
+        return CS2_KCS_DONE_VALUE;
     }
 
     /*
@@ -643,6 +707,54 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     }
 
     /*
+     * 517: the system script claims a scene-script command for itself, by name
+     * and by number. Forty-odd of them - title, select, movie, cgreg, place -
+     * are the screens the game's front end is made of.
+     */
+    case 517: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        uint32_t id = arg(arguments, argument_size, 2);
+        if (name != NULL && system->command_count < SCENE_COMMANDS) {
+            scene_command *fresh = &system->commands[system->command_count++];
+            snprintf(fresh->name, sizeof fresh->name, "%s", name);
+            fresh->id = id;
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /*
+     * 326: which of those commands the word at this place in the scenario is,
+     * and -1 when it is not one of them. 327 is the same word as text. Between
+     * them the system script reads the scene script it put on the screen.
+     */
+    case 326: {
+        char word[WORD_BYTES];
+        *answer = 0xffffffffu;
+        if (scene_word(system, arg(arguments, argument_size, 1),
+                       arg(arguments, argument_size, 2), word, sizeof word) != 0) {
+            return CS2_KCS_DONE_VALUE;
+        }
+        for (size_t i = 0; i < system->command_count; i++) {
+            if (cs2_ieq(system->commands[i].name, word)) {
+                *answer = system->commands[i].id;
+                break;
+            }
+        }
+        return CS2_KCS_DONE_VALUE;
+    }
+    case 327: {
+        char word[WORD_BYTES];
+        uint32_t destination = arg(arguments, argument_size, 1);
+        scene_word(system, arg(arguments, argument_size, 2),
+                   arg(arguments, argument_size, 3), word, sizeof word);
+        size_t length = strlen(word) + 1;
+        char *at = cs2_kcs_at(script, destination, (uint32_t) length);
+        if (at != NULL) memcpy(at, word, length);
+        *answer = destination;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
      * 330 and 331: the scenario's turn, once a frame. In the game these are two
      * halves of the same thing - run what the script has to run, then draw what
      * it left - and the scene player is written the same way round: it runs
@@ -781,6 +893,11 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE_VALUE;
 
     default:
+        for (size_t i = 0; i < sizeof unwritten_return_codes / sizeof *unwritten_return_codes; i++) {
+            if (unwritten_return_codes[i].id == id) {
+                return CS2_KCS_UNWRITTEN_WITH(unwritten_return_codes[i].code);
+            }
+        }
         return CS2_KCS_UNWRITTEN;
     }
 }

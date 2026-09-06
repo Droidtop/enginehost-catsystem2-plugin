@@ -45,6 +45,15 @@ enum {
 };
 
 /*
+ * Not written yet, but the game's own return code for it has been read off its
+ * handler. Answering zero is a guess; leaving the stack as the script expects
+ * is not, and a function that answers a value where the original answered none
+ * puts a word on the stack the next statement will take for its own. So a run
+ * gets much further when the code is given even where the work is not done.
+ */
+#define CS2_KCS_UNWRITTEN_WITH(code) (-2 - (int) (code))
+
+/*
  * One engine function, called with the argument block the script pushed (its
  * layout is that function's own business) and a slot to answer in.
  */

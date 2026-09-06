@@ -228,7 +228,16 @@ static void fault(cs2_kcs *script, const char *format, ...) {
     va_start(arguments, format);
     vsnprintf(message, sizeof message, format, arguments);
     va_end(arguments);
-    if (!script->fault) cs2_set_error("%s at %#x: %s", script->name, script->pc, message);
+    if (!script->fault) {
+        /*
+         * Where the script was, and where its stack was: a fault in a machine
+         * like this is almost always a frame that did not balance, so the three
+         * marks are the first thing to look at.
+         */
+        cs2_set_error("%s at %#x: %s (stack %#x, frame %#x, arguments %#x, after %llu)",
+                      script->name, script->pc, message, script->sp, script->frame,
+                      script->base, (unsigned long long) script->instructions);
+    }
     script->fault = 1;
 }
 
@@ -646,9 +655,26 @@ static int do_gcall(cs2_kcs *script, uint32_t at_opcode) {
     int written = result >= 0;
     if (!written) {
         answer = 0;
-        result = CS2_KCS_DONE_VALUE;
+        /*
+         * Where the game's own return code has been read off the handler it is
+         * used, so the stack is left exactly as the script expects even though
+         * the work is not done. Where it has not, answering is the safe half of
+         * the guess: a caller that wanted no answer drops it at the end of the
+         * statement anyway, while a caller that wanted one and got nothing
+         * would take someone else's value off the stack.
+         */
+        result = result <= -2 ? -2 - result : CS2_KCS_DONE_VALUE;
     }
 
+    /*
+     * Every call, not just the first of each, when CS2_KCS_TRACE is set. What a
+     * fault in a script this size needs is the order the calls came in, and
+     * which one was last before it: this is how the front end's path through
+     * the game is followed.
+     */
+    if (getenv("CS2_KCS_TRACE") != NULL) {
+        cs2_log("%s %#x: engine function %u answered %d", script->name, at_opcode, id, result);
+    }
     /* Each function is named once: this is how the boot path names itself. */
     if (id < KCS_GCALL_COUNT && !script->seen[id]) {
         script->seen[id] = 1;
@@ -812,6 +838,18 @@ static int step(cs2_kcs *script) {
         script->base = pop(script);
         script->pc = pop(script);
         if (script->fault) return -1;
+        /*
+         * A return reads back the three marks the call wrote. If they are not
+         * marks the fault is here, in the frame that did not balance, and not
+         * two hundred instructions later when the stack finally runs out.
+         */
+        if (script->pc >= script->code_size
+            || script->frame < script->globals_size || script->frame > script->memory_size
+            || script->base < script->globals_size || script->base > script->memory_size) {
+            fault(script, "a return read back %#x, %#x, %#x, which are not a call's marks",
+                  script->pc, script->frame, script->base);
+            return -1;
+        }
         script->sp -= argument_size;
         if (answer_size != 0) {
             if (answer_at + answer_size > script->memory_size
@@ -861,16 +899,20 @@ static int step(cs2_kcs *script) {
 
     case 0x31:  /* enter: room for the locals */
         left = operand(script, &left_flags);
-        script->frame += left;
-        script->sp = script->frame;
-        if (script->frame > script->memory_size) {
-            fault(script, "the stack is full");
+        if (left > script->memory_size - script->frame) {
+            fault(script, "a frame asked for %u bytes of stack", left);
             return -1;
         }
+        script->frame += left;
+        script->sp = script->frame;
         return 1;
 
-    case 0x32:  /* leave */
+    case 0x32:  /* leave: give the locals back */
         left = operand(script, &left_flags);
+        if (left > script->frame - script->globals_size) {
+            fault(script, "a frame gave back %u bytes it never took", left);
+            return -1;
+        }
         script->frame -= left;
         return 1;
 
