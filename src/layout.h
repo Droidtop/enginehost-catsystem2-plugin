@@ -46,6 +46,12 @@ typedef struct {
      * layout. The caller frees what comes back.
      */
     char *(*text_of)(void *context, int number);
+    /*
+     * And one of them as it stands: a file name, a path, whatever the scripts
+     * have put there. text_of is the same string turned into what a reader
+     * should see; this is the string itself.
+     */
+    const char *(*string)(void *context, int number);
     void (*run_script)(void *context, const char *name);
     void (*stop_script)(void *context);
 } cs2_layout_host;

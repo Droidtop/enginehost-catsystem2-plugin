@@ -404,6 +404,10 @@ static void host_set_string(void *context, int number, const char *text) {
  * message markup taken off it, which is what everything else drawn from a
  * script goes through too.
  */
+static const char *host_string(void *context, int number) {
+    return cs2_system_string(context, (uint32_t) number);
+}
+
 static char *host_text_of(void *context, int number) {
     cs2_system *system = context;
     const char *raw = cs2_system_string(system, (uint32_t) number);
@@ -484,7 +488,7 @@ static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
     }
     cs2_layout_host host = {
         system, host_flag, host_set_flag, host_set_string, host_text_of,
-        host_run_script, host_stop_script
+        host_string, host_run_script, host_stop_script
     };
     cs2_layout *started = cs2_layout_start(system->files, plane->layout, &host);
     if (started == NULL) {

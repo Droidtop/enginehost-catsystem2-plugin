@@ -165,8 +165,16 @@ void cs2_planes_draw(const cs2_planes *planes, uint32_t *canvas, int width, int 
         float fx = 0, fy = 0;
         absolute(planes, plane, &fx, &fy);
         int left = (int) fx, top = (int) fy;
-        int wide = plane->width > 0 ? (int) plane->width : width;
-        int tall = plane->height > 0 ? (int) plane->height : height;
+        /*
+         * A plane covers its own rectangle and no more. A plane with no size
+         * used to be taken as the whole screen, and once a scene starts the
+         * game has thirty-odd of those - the layers it has made and not yet
+         * put anything on - so the reader was shown a screen of flat colour
+         * with the game underneath it.
+         */
+        if (plane->width == 0 || plane->height == 0) continue;
+        int wide = (int) plane->width;
+        int tall = (int) plane->height;
         for (int y = top; y < top + tall; y++) {
             if (y < 0 || y >= height) continue;
             for (int x = left; x < left + wide; x++) {
