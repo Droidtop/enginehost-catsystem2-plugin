@@ -31,6 +31,11 @@ static void usage(void) {
         "                    menus - instead of playing a scene, and say which of the\n"
         "                    engine's functions it asks for\n"
         "  --frames <n>      how many frames of it to run (default 60)\n"
+        "  --boot <n>        what the system script boots into: -1 a new game, -2 a\n"
+        "                    recollection, -10 scene select, -20 the ordinary boot\n"
+        "                    through start.txt, anything else a saved game (default -20)\n"
+        "  --boot-scene <s>  the scene script that boot begins on, for the ways in\n"
+        "                    that name one\n"
         "  --script <name>   play this script instead of the game's own entry point,\n"
         "                    as \"ama_001.cst\" or \"scene.int/ama_001.cst\"\n"
         "  --steps <n>       advance n times before showing anything (default 1)\n"
@@ -99,6 +104,8 @@ int main(int argc, char **argv) {
     const char *images = NULL;
     const char *kcs_script = NULL;
     int kcs_frames = 0;
+    int boot_type = -20;
+    const char *boot_scene = NULL;
     int silent = 0;
     int steps = 1;
     for (int i = 2; i < argc; i++) {
@@ -107,6 +114,8 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') kcs_script = argv[++i];
         }
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) kcs_frames = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--boot") == 0 && i + 1 < argc) boot_type = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--boot-scene") == 0 && i + 1 < argc) boot_scene = argv[++i];
         else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
         else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
@@ -196,6 +205,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "%s\n", cs2_error());
             return 1;
         }
+        cs2_system_set_boot(system, boot_type, boot_scene);
         uint32_t variable_size = 0;
         void *variables = cs2_system_variables(system, &variable_size);
         cs2_kcs_set_variables(system_script, variables, variable_size);
@@ -233,18 +243,35 @@ int main(int argc, char **argv) {
                     (double) plane->priority, plane->visible ? " shown" : " hidden",
                     plane->filled ? " painted" : "", plane->layout[0] != 0 ? " laid out" : "");
         }
+        const cs2_scene *scenario = cs2_system_scenario(system);
+        if (scenario != NULL) {
+            cs2_log("the scenario is %s, %zu/%zu", cs2_scene_path(scenario),
+                    cs2_scene_cursor(scenario), cs2_scene_line_count(scenario));
+        }
         if (shot != NULL) {
             uint32_t *canvas = calloc((size_t) width * height, sizeof *canvas);
             if (canvas == NULL) {
                 fprintf(stderr, "out of memory for a %dx%d frame\n", width, height);
                 result = 1;
             } else {
-                for (size_t i = 0; i < (size_t) width * height; i++) canvas[i] = 0xff000000u;
+                /*
+                 * The screen is the scenario with the scripts' own planes over
+                 * it: the front end puts a scene script on the screen and hangs
+                 * its own furniture above it, so that is the order it is drawn.
+                 */
+                cs2_render *render = cs2_render_new(files, width, height);
+                if (render != NULL && scenario != NULL) {
+                    const uint32_t *drawn = cs2_render_frame(render, scenario, NULL);
+                    memcpy(canvas, drawn, (size_t) width * height * sizeof *canvas);
+                } else {
+                    for (size_t i = 0; i < (size_t) width * height; i++) canvas[i] = 0xff000000u;
+                }
                 cs2_planes_draw(planes, canvas, width, height);
                 if (cs2_png_write(shot, canvas, width, height) != 0) {
                     fprintf(stderr, "%s\n", cs2_error());
                     result = 1;
                 }
+                cs2_render_free(render);
                 free(canvas);
             }
         }

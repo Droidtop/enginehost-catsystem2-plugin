@@ -19,6 +19,8 @@
 #include "files.h"
 #include "kcs.h"
 #include "plane.h"
+#include "scene.h"
+#include "scene.h"
 
 typedef struct cs2_system cs2_system;
 
@@ -38,6 +40,46 @@ void cs2_system_event(cs2_system *system, uint32_t event);
  * script has had its turn.
  */
 void cs2_system_frame(cs2_system *system);
+
+/*
+ * The scenario: the scene script the system script has put on the screen. The
+ * front end does not draw the title, a menu or a line of dialogue itself - it
+ * loads a scene script (325) and steps it (330, 331), and everything the scene
+ * player already does happens on the far side of that. NULL until one is
+ * loaded.
+ */
+const cs2_scene *cs2_system_scenario(const cs2_system *system);
+
+/*
+ * What the system script boots into, which in the game is set by whatever
+ * starts it rather than by a script: the boot type (-1 a new game, -2 a
+ * recollection, -10 scene select, -20 the ordinary boot through start.txt,
+ * anything else a saved game to load) and, for the branches that need one, the
+ * scene script that game begins on. adv.xml names the numbers these are kept
+ * under; they are written into those the moment the system script starts,
+ * which is when the game's own engine has them.
+ */
+void cs2_system_set_boot(cs2_system *system, int type, const char *scenario);
+
+/*
+ * The scenario: the scene script the system script has put on the screen. The
+ * front end does not draw the title, a menu or a line of dialogue itself - it
+ * loads a scene script (325) and steps it (330, 331), and everything the scene
+ * player already does happens on the far side of that. NULL until one is
+ * loaded.
+ */
+const cs2_scene *cs2_system_scenario(const cs2_system *system);
+
+/*
+ * What the system script boots into, which in the game is set by whatever
+ * starts it rather than by a script: the boot type (-1 a new game, -2 a
+ * recollection, -10 scene select, -20 the ordinary boot through start.txt,
+ * anything else a saved game to load) and, for the branches that need one, the
+ * scene script that game begins on. adv.xml names the numbers these are kept
+ * under; they are written into those the moment the system script starts,
+ * which is when the game's own engine has them.
+ */
+void cs2_system_set_boot(cs2_system *system, int type, const char *scenario);
 
 /* The screen as the scripts have built it, for drawing and for logs. */
 const cs2_planes *cs2_system_planes(const cs2_system *system);

@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "cs2.h"
+#include "scene.h"
 #include "startup.h"
 
 #define DOCUMENT_LIMIT 8
@@ -62,6 +63,13 @@ struct cs2_system {
     cs2_startup *documents[DOCUMENT_LIMIT];
     int scenario;                /* 789 answers this; 209 makes its interpreter */
     int interpreter;
+    cs2_startup *settings;       /* the game's startup.xml, for the message format */
+    cs2_text *format;
+    cs2_scene *scene;            /* what 325 has loaded, and 330 steps */
+    int scene_loaded;
+    int scene_step;              /* the scene has something to run this frame */
+    int boot_type;
+    char boot_scenario[128];
     cs2_kcs *flow;               /* the system script a started plane runs */
     cs2_plane flow_plane;
     system_variable system_variables[SYSTEM_VARIABLES];
@@ -125,6 +133,25 @@ cs2_system *cs2_system_new(cs2_files *files, int width, int height) {
         return NULL;
     }
     system->scenario = 1;
+    system->boot_type = -20;
+
+    /*
+     * The scene player the front end drives. It needs the game's own message
+     * substitutions, which live in startup.xml beside the archives.
+     */
+    cs2_bytes document = {0};
+    if (cs2_files_read(files, "config.int/startup.xml", &document) == 0
+        || cs2_files_read(files, "startup.xml", &document) == 0) {
+        system->settings = cs2_startup_parse(document.data, document.size);
+        cs2_bytes_free(&document);
+    }
+    system->format = cs2_text_from(system->settings);
+    system->scene = system->format == NULL ? NULL : cs2_scene_new(files, system->format);
+    if (system->scene == NULL) {
+        cs2_system_free(system);
+        cs2_set_error("out of memory for the scenario the front end plays");
+        return NULL;
+    }
     return system;
 }
 
@@ -137,12 +164,33 @@ void cs2_system_free(cs2_system *system) {
         cs2_kcs_free(system->flow);
     }
     cs2_planes_free(system->planes);
+    cs2_scene_free(system->scene);
+    cs2_text_free(system->format);
+    cs2_startup_free(system->settings);
     free(system->variables);
     free(system);
 }
 
 void cs2_system_event(cs2_system *system, uint32_t event) {
     system->event = event;
+    /*
+     * The reader has asked for the next thing. The system script is told too -
+     * it is what decides whether the click belongs to a menu - but a scenario
+     * on the screen advances on it, which is what reading the game is.
+     */
+    if (system->scene_loaded) system->scene_step = 1;
+}
+
+const cs2_scene *cs2_system_scenario(const cs2_system *system) {
+    if (system == NULL || !system->scene_loaded) return NULL;
+    return system->scene;
+}
+
+void cs2_system_set_boot(cs2_system *system, int type, const char *scenario) {
+    if (system == NULL) return;
+    system->boot_type = type;
+    snprintf(system->boot_scenario, sizeof system->boot_scenario, "%s",
+             scenario == NULL ? "" : scenario);
 }
 
 const cs2_planes *cs2_system_planes(const cs2_system *system) {
@@ -234,7 +282,24 @@ static void start_the_system_script(cs2_system *system, cs2_plane_state *plane) 
     cs2_kcs_set_variables(system->flow, system->variables, VARIABLE_BYTES);
     cs2_kcs_set_gcall(system->flow, cs2_system_gcall, system);
     cs2_kcs_trace(system->flow, 1);
-    cs2_log("the plane %s runs kcs.int/sscript.kcs", plane->name);
+
+    /*
+     * What the system script boots into. The boot script has by now read the
+     * numbers out of adv.xml and left them where the engine keeps them - the
+     * flag the boot type is held in at 0x80004884, the string the start file
+     * is held in at 0x800048D8 - so the two are written under those numbers,
+     * which is what the game's own engine does before it starts the script.
+     */
+    uint32_t boot_flag = 0, boot_string = 0;
+    memcpy(&boot_flag, system->variables + 0x4884u, 4);
+    memcpy(&boot_string, system->variables + 0x48D8u, 4);
+    cs2_system_set_variable(system, boot_flag, (uint32_t) (int32_t) system->boot_type);
+    if (system->boot_scenario[0] != 0) {
+        cs2_system_set_string(system, boot_string, system->boot_scenario);
+    }
+    cs2_log("the plane %s runs kcs.int/sscript.kcs, boot type %d%s%s", plane->name,
+            system->boot_type, system->boot_scenario[0] == 0 ? "" : " from ",
+            system->boot_scenario);
 }
 
 void cs2_system_frame(cs2_system *system) {
@@ -547,6 +612,62 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         *answer = (uint32_t) (int32_t) (value < 0 ? value - 0.5f : value + 0.5f);
         return CS2_KCS_DONE_VALUE;
     }
+
+    /*
+     * 325: put a scene script on the screen. This is the bridge between the
+     * game's front end and its scene player: every way into the game - a new
+     * game, a recollection, a saved game, the title screen itself - ends in
+     * this call, and everything the scene player draws is on the far side of
+     * it. The name is the scenario's, without a folder or an extension.
+     */
+    case 325: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        char path[256];
+        *answer = 0;
+        if (name == NULL || name[0] == 0) return CS2_KCS_DONE_VALUE;
+        if (strchr(name, '/') != NULL) {
+            snprintf(path, sizeof path, "%s", name);
+        } else {
+            size_t length = strlen(name);
+            int has_suffix = length > 4 && cs2_ieq(name + length - 4, ".cst");
+            snprintf(path, sizeof path, "scene.int/%s%s", name, has_suffix ? "" : ".cst");
+        }
+        if (cs2_scene_play(system->scene, path) != 0) {
+            cs2_log("%s: %s", cs2_kcs_name(script), cs2_error());
+            return CS2_KCS_DONE_VALUE;
+        }
+        system->scene_loaded = 1;
+        system->scene_step = 1;
+        *answer = 1;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 330 and 331: the scenario's turn, once a frame. In the game these are two
+     * halves of the same thing - run what the script has to run, then draw what
+     * it left - and the scene player is written the same way round: it runs
+     * commands until the script wants the reader, and what it leaves behind is
+     * the frame. So the running is here and the drawing is whoever composes the
+     * screen.
+     */
+    case 330:
+        if (system->scene_loaded && system->scene_step) {
+            system->scene_step = 0;
+            cs2_scene_advance(system->scene);
+            const char *skipped = cs2_scene_take_skipped(system->scene);
+            if (skipped[0] != 0) {
+                cs2_log("%s: commands not carried out yet: %s", cs2_kcs_name(script), skipped);
+            }
+        }
+        return CS2_KCS_DONE;
+    case 331:
+        return CS2_KCS_DONE;
+
+    /* 332: how many lines a scene script holds, which is how far it can be
+     * wound on. */
+    case 332:
+        *answer = (uint32_t) cs2_scene_line_count(system->scene);
+        return CS2_KCS_DONE_VALUE;
 
     /*
      * 359: the game's engine copies four blocks of its own state into the
