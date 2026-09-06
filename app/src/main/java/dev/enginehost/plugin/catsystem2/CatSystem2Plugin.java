@@ -22,14 +22,23 @@ import java.io.IOException;
  * game's own front end on the screen - the logo, the title screen, and the new
  * game that starts the system script - and draws each frame into a buffer of
  * pixels. Everything this class does is hand it the game folder, drive its
- * frames off the display's own clock, show the buffer and pass the reader's
- * taps back. No part of the engine is repeated in Java, and nothing here
- * decides what the game shows.
+ * frames off the display's own clock, show the buffer, and pass the reader's
+ * taps and pad back - a tap put back into the game's own pixels first, since
+ * the game's screen is drawn scaled onto the console's. No part of the engine
+ * is repeated in Java, and nothing here decides what the game shows.
  */
 public final class CatSystem2Plugin implements EnginePlugin {
     static {
         System.loadLibrary("catsystem2");
     }
+
+    /* The pad, as the engine numbers it. */
+    private static final int KEY_UP = 0;
+    private static final int KEY_DOWN = 1;
+    private static final int KEY_LEFT = 2;
+    private static final int KEY_RIGHT = 3;
+    private static final int KEY_CONFIRM = 4;
+    private static final int KEY_CANCEL = 5;
 
     private EnginePluginSession session;
     private long engine;
@@ -64,12 +73,26 @@ public final class CatSystem2Plugin implements EnginePlugin {
         }
     }
 
+    /**
+     * The pad. The front end - the title screen, the scenario list, the menus -
+     * is a set of buttons the game lays out itself, and the d-pad walks them;
+     * confirm presses the one it is on, and cancel is what the layouts read as
+     * a right click. Nothing here decides what a button does.
+     */
     @Override public boolean onControllerEvent(EngineControllerEvent event) {
-        if (event.pressed() && ("confirm".equals(event.action()) || "page_next".equals(event.action()))) {
-            nativeAdvance(engine);
-            return true;
+        if (engine == 0 || !event.pressed()) return false;
+        int key;
+        switch (event.action()) {
+            case "up": key = KEY_UP; break;
+            case "down": key = KEY_DOWN; break;
+            case "left": key = KEY_LEFT; break;
+            case "right": key = KEY_RIGHT; break;
+            case "confirm": case "page_next": key = KEY_CONFIRM; break;
+            case "cancel": key = KEY_CANCEL; break;
+            default: return false;
         }
-        return false;
+        nativeKey(engine, key);
+        return true;
     }
 
     /**
@@ -119,17 +142,33 @@ public final class CatSystem2Plugin implements EnginePlugin {
             else running = false;
         }
 
+        /** Where the game's fixed screen sits on the console's, letterboxed. */
+        private float scale() {
+            return Math.min(getWidth() / (float) width, getHeight() / (float) height);
+        }
+
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            float scale = Math.min(getWidth() / (float) width, getHeight() / (float) height);
+            float scale = scale();
             float left = (getWidth() - width * scale) / 2;
             float top = (getHeight() - height * scale) / 2;
             destination.set(left, top, left + width * scale, top + height * scale);
             canvas.drawBitmap(frame, source, destination, paint);
         }
 
+        /**
+         * A tap, in the game's own pixels. The game is authored for a fixed
+         * screen and drawn scaled and centred on the console's, so a tap has to
+         * be put back where the game would have seen it before the engine can
+         * say which of its buttons it landed on.
+         */
         @Override public boolean onTouchEvent(MotionEvent event) {
-            if (event.getAction() == MotionEvent.ACTION_UP) nativeAdvance(engine);
+            if (event.getAction() != MotionEvent.ACTION_UP || engine == 0) return true;
+            float scale = scale();
+            if (scale <= 0) return true;
+            int x = Math.round((event.getX() - (getWidth() - width * scale) / 2) / scale);
+            int y = Math.round((event.getY() - (getHeight() - height * scale) / 2) / scale);
+            nativeTouch(engine, x, y);
             return true;
         }
     }
@@ -142,5 +181,6 @@ public final class CatSystem2Plugin implements EnginePlugin {
     private static native int nativeHeight(long engine);
     private static native boolean nativeStep(long engine);
     private static native void nativeFrame(long engine, int[] pixels);
-    private static native void nativeAdvance(long engine);
+    private static native void nativeTouch(long engine, int x, int y);
+    private static native void nativeKey(long engine, int key);
 }

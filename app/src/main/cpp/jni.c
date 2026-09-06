@@ -304,12 +304,47 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeFrame(
     (*env)->SetIntArrayRegion(env, pixels, 0, (jsize) count, (const jint *) state->canvas);
 }
 
-/* The reader asked for the next thing: a tap, or the confirm button. */
+/*
+ * A tap, where it landed. The front end reads it as a click on one of its own
+ * buttons - the title screen's New Game is a button like any other - and the
+ * scenario reads it as "the next line, please". Both are true of one tap, and
+ * which of them means anything depends on what is on the screen, so both are
+ * sent and the engine decides. The coordinates are the game's own screen, so
+ * Java has already undone the scaling the console's display put on it.
+ */
 JNIEXPORT void JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeAdvance(
-        JNIEnv *env, jclass type, jlong handle) {
+Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeTouch(
+        JNIEnv *env, jclass type, jlong handle, jint x, jint y) {
     (void) env;
     (void) type;
     session *state = from_handle(handle);
-    if (state != NULL) cs2_system_event(state->system, 1);
+    if (state == NULL) return;
+    cs2_system_click(state->system, x, y, 1);
+    cs2_system_event(state->system, 1);
+}
+
+/*
+ * The pad. The d-pad walks the buttons of whatever screen is up, over the
+ * layout's own KEYBLOCK grids; confirm presses the one it is on and also
+ * advances the scenario, because on a console it is the same button for both.
+ */
+JNIEXPORT void JNICALL
+Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeKey(
+        JNIEnv *env, jclass type, jlong handle, jint key) {
+    (void) env;
+    (void) type;
+    session *state = from_handle(handle);
+    if (state == NULL) return;
+    switch (key) {
+    case 0: cs2_system_press(state->system, CS2_LAYOUT_UP); break;
+    case 1: cs2_system_press(state->system, CS2_LAYOUT_DOWN); break;
+    case 2: cs2_system_press(state->system, CS2_LAYOUT_LEFT); break;
+    case 3: cs2_system_press(state->system, CS2_LAYOUT_RIGHT); break;
+    case 4:
+        cs2_system_press(state->system, CS2_LAYOUT_CONFIRM);
+        cs2_system_event(state->system, 1);
+        break;
+    case 5: cs2_system_press(state->system, CS2_LAYOUT_CANCEL); break;
+    default: break;
+    }
 }
