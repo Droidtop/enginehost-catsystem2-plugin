@@ -31,6 +31,19 @@ void cs2_set_error(const char *format, ...);
 void cs2_log(const char *format, ...);
 void cs2_log_quiet(int quiet);
 
+/*
+ * Where the log goes. It goes to stderr, which is right for the desktop runner
+ * and is nowhere at all on Android: a native library's stderr is discarded, so
+ * every line this engine writes about what the game asked for was lost on the
+ * console. dq-catsystem2-24 found that the hard way - five logcat pulls across
+ * a whole run with not one line of ours in them - and a run whose log says
+ * nothing cannot be read.
+ *
+ * So the host says where its log goes. One complete line at a time, with no
+ * newline on it. NULL puts it back on stderr.
+ */
+void cs2_log_to(void (*sink)(const char *line, void *context), void *context);
+
 /* Little-endian reads out of a bounded buffer. 0 when the read is out of range. */
 uint32_t cs2_u32(const uint8_t *data, size_t size, size_t at);
 uint16_t cs2_u16(const uint8_t *data, size_t size, size_t at);

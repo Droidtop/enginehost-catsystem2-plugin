@@ -561,7 +561,6 @@ static int object_command(cs2_layout *layout, const char *line) {
             string_command(layout, object, command, rest);
         } else if (strcmp(command, "disp") == 0) object->declared.disp = a;
         else if (strcmp(command, "enable") == 0) object->declared.enable = a;
-        else if (strcmp(command, "noact") == 0) object->declared.enable = a == 0;
         else if (strcmp(command, "setid") == 0) object->current_id = a;
         else if (strcmp(command, "delete") == 0) object->deleted = 1;
         else if (strcmp(command, "pos") == 0 && given >= 2) {
@@ -570,8 +569,21 @@ static int object_command(cs2_layout *layout, const char *line) {
         } else if (strcmp(command, "fade") == 0 && given >= 3) {
             fade_start(object, a, b, c);
         }
-        /* load, play, stop, blend and the rest are the sound and motion
-           vocabulary; they are not what puts a screen up and are read past. */
+        /*
+         * load, play, stop, blend and the rest are the sound and motion
+         * vocabulary; they are not what puts a screen up and are read past.
+         *
+         * noact is read past with them, and used not to be: it was taken for
+         * "disable this button", which cost the console a whole screen. Every
+         * screen in the game does it to one element of the row it has just
+         * enabled - "btn_d[0] noact 1" on the title, "btn_hit[1] noact 1" on
+         * the scenario list - and omake_sysvoice does it to all six of its
+         * buttons in turn, each one overriding the last as its condition
+         * allows, which no reading of "disable" survives. What it looks like
+         * is where the pad starts, set without running the button's action;
+         * the console's own screenshot of the scenario list shows the button
+         * neither lit nor greyed, so it is left alone until that is settled.
+         */
     }
     return 1;
 }
