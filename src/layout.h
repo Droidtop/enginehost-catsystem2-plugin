@@ -38,6 +38,14 @@ typedef struct {
     int32_t (*flag)(void *context, int number);
     void (*set_flag)(void *context, int number, int32_t value);
     void (*set_string)(void *context, int number, const char *text);
+    /*
+     * One of those strings as a reader should see it: the game's own
+     * substitutions applied and the message markup taken off. The message
+     * window appends its line this way - "str apend $str1000" - so the
+     * conversion belongs where the rest of the game's text is done, not in a
+     * layout. The caller frees what comes back.
+     */
+    char *(*text_of)(void *context, int number);
     void (*run_script)(void *context, const char *name);
     void (*stop_script)(void *context);
 } cs2_layout_host;

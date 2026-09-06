@@ -60,6 +60,7 @@ static cs2_fes_kind kind_of(const char *word) {
         || strcmp(word, "DIFIMAGE") == 0) return CS2_FES_IMAGE;
     if (strcmp(word, "BUTTON") == 0) return CS2_FES_BUTTON;
     if (strcmp(word, "SOUND") == 0) return CS2_FES_SOUND;
+    if (strcmp(word, "STRING") == 0) return CS2_FES_STRING;
     return CS2_FES_OTHER;
 }
 

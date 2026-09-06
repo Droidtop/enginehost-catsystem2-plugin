@@ -28,7 +28,6 @@
 #define VARIABLE_BYTES 0x10000u
 #define SYSTEM_VARIABLES 256
 #define SYSTEM_STRINGS 128
-#define STRING_BYTES 260
 
 /*
  * A system variable, as 210 and 211 pass them about: the scripts hand the
@@ -52,7 +51,7 @@ typedef struct {
  */
 typedef struct {
     uint32_t key;
-    char value[STRING_BYTES];
+    char *value;                 /* a line of dialogue is as long as it is */
 } system_string;
 
 struct cs2_system {
@@ -110,13 +109,24 @@ static system_string *system_string_at(cs2_system *system, uint32_t key, int mak
     if (!make || system->system_string_count >= SYSTEM_STRINGS) return NULL;
     system_string *fresh = &system->system_strings[system->system_string_count++];
     fresh->key = key;
-    fresh->value[0] = 0;
+    fresh->value = NULL;
     return fresh;
 }
 
+/*
+ * These held 259 bytes each, and a line of Grisaia's dialogue is longer than
+ * that: the message window was given its first line with the last third of it
+ * cut off. A numbered string is as long as what is put in it.
+ */
 void cs2_system_set_string(cs2_system *system, uint32_t number, const char *text) {
     system_string *slot = system_string_at(system, number, 1);
-    if (slot != NULL) snprintf(slot->value, sizeof slot->value, "%s", text == NULL ? "" : text);
+    if (slot == NULL) return;
+    if (text == NULL) text = "";
+    size_t length = strlen(text) + 1;
+    char *kept = realloc(slot->value, length);
+    if (kept == NULL) return;
+    memcpy(kept, text, length);
+    slot->value = kept;
 }
 
 const char *cs2_system_string(cs2_system *system, uint32_t number) {
@@ -221,6 +231,9 @@ void cs2_system_free(cs2_system *system) {
     cs2_scene_free(system->scene);
     cs2_text_free(system->format);
     cs2_startup_free(system->settings);
+    for (size_t i = 0; i < system->system_string_count; i++) {
+        free(system->system_strings[i].value);
+    }
     free(system->variables);
     free(system);
 }
@@ -367,6 +380,21 @@ static void host_set_string(void *context, int number, const char *text) {
     cs2_system_set_string(context, (uint32_t) number, text);
 }
 
+/*
+ * One of those strings as a reader should see it. The message window is given
+ * its line as a number - sscript writes the line with 276 and then sends
+ * MES_SETSTRING, and meswnd.fes says "str apend $str1000" - so what the window
+ * appends has still to go through the game's own substitutions and have the
+ * message markup taken off it, which is what everything else drawn from a
+ * script goes through too.
+ */
+static char *host_text_of(void *context, int number) {
+    cs2_system *system = context;
+    const char *raw = cs2_system_string(system, (uint32_t) number);
+    if (raw == NULL) return NULL;
+    return cs2_text_display(system->format, raw);
+}
+
 /* execkcs: the layout starts one of the game's system scripts beside itself. */
 static void host_run_script(void *context, const char *name) {
     cs2_system *system = context;
@@ -439,7 +467,7 @@ static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
         return;
     }
     cs2_layout_host host = {
-        system, host_flag, host_set_flag, host_set_string,
+        system, host_flag, host_set_flag, host_set_string, host_text_of,
         host_run_script, host_stop_script
     };
     cs2_layout *started = cs2_layout_start(system->files, plane->layout, &host);
