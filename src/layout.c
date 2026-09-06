@@ -19,6 +19,7 @@
 #define LOCALS 32
 #define CALL_DEPTH 16
 #define LINE_BUDGET 20000
+#define COMMANDS_SAID 48
 
 typedef struct {
     int section;
@@ -75,6 +76,8 @@ struct cs2_layout {
     int32_t click_left, click_right;
     int focus;               /* the object the pad is on, -1 for none */
     int said_buttons;        /* the screen has named its buttons in the log once */
+    char said[COMMANDS_SAID][32];  /* the commands it has been sent, said once each */
+    int said_count;
     int at_index;            /* what [@] means: the button whose event is running */
     int went;                /* the script has just changed state with next */
 };
@@ -371,8 +374,13 @@ static void go_to(cs2_layout *layout, const char *name) {
     layout->depth = 0;
 }
 
-/* One frame's worth of a layout's script. */
-static void run(cs2_layout *layout) {
+/*
+ * The statements. One frame of the state a layout is in (one_frame), or one
+ * command section run out to its end (not one_frame): a command is not a
+ * state, so where a frame would stop and come back next time - the end of the
+ * section, a break at the bottom, a wait - the command is simply over.
+ */
+static void run_lines(cs2_layout *layout, int one_frame) {
     for (int budget = 0; budget < LINE_BUDGET; budget++) {
         size_t count = cs2_fes_section_lines(layout->fes, layout->section);
         if (layout->line >= count) {
@@ -383,7 +391,7 @@ static void run(cs2_layout *layout) {
                 continue;
             }
             layout->line = 0;              /* the state runs again next frame */
-            return;
+            return;                        /* and a command is finished */
         }
         const char *line = line_at(layout, layout->section, layout->line);
         if (line == NULL || line[0] == 0) {
@@ -456,8 +464,10 @@ static void run(cs2_layout *layout) {
             const char *rest = line + 4;
             while (*rest == ' ') rest++;
             layout->line++;
-            if (*rest >= '0' && *rest <= '9') layout->wait_frames = atoi(rest);
-            else layout->wait_motion = 1;
+            if (one_frame) {
+                if (*rest >= '0' && *rest <= '9') layout->wait_frames = atoi(rest);
+                else layout->wait_motion = 1;
+            }
             return;
         }
         if (strcmp(word, "exit") == 0) {
@@ -536,6 +546,65 @@ static void run(cs2_layout *layout) {
     layout->line = 0;
 }
 
+/*
+ * A command from outside. It runs on its own: the state the layout is in is
+ * put aside and given back afterwards, so a command sent while the message
+ * window is waiting for the reader does not lose its place in #WAIT_USER.
+ *
+ * A screen that has no section of that name simply does not answer it - a
+ * layout implements the commands it is for and no more.
+ */
+void cs2_layout_send(cs2_layout *layout, const char *command) {
+    if (layout == NULL || command == NULL) return;
+    int section = cs2_fes_section(layout->fes, command);
+
+    /*
+     * Say each command once. The script sends MES_ISDRAW every frame it is
+     * waiting, so saying them all would be the whole log; saying each the
+     * first time is what tells a reader of the log what a screen was asked to
+     * do, and which of the asks it has no answer for.
+     */
+    int said = 0;
+    for (int i = 0; i < layout->said_count; i++) {
+        if (strcmp(layout->said[i], command) == 0) said = 1;
+    }
+    if (!said) {
+        if (layout->said_count < COMMANDS_SAID) {
+            snprintf(layout->said[layout->said_count], 32, "%s", command);
+            layout->said_count++;
+        }
+        cs2_log("%s.fes is sent %s%s", cs2_fes_name(layout->fes), command,
+                section < 0 ? ", which it has no section for" : "");
+    }
+    if (section < 0) return;
+
+    int was_section = layout->section;
+    size_t was_line = layout->line;
+    int was_depth = layout->depth;
+    call_frame was_stack[CALL_DEPTH];
+    memcpy(was_stack, layout->stack, sizeof was_stack);
+
+    layout->section = section;
+    layout->line = 0;
+    layout->depth = 0;
+    run_lines(layout, 0);
+
+    layout->section = was_section;
+    layout->line = was_line;
+    layout->depth = was_depth;
+    memcpy(layout->stack, was_stack, sizeof layout->stack);
+}
+
+void cs2_layout_set_local(cs2_layout *layout, int number, int32_t value) {
+    if (layout == NULL || number < 0 || number >= LOCALS) return;
+    layout->locals[number] = value;
+}
+
+int32_t cs2_layout_local(const cs2_layout *layout, int number) {
+    if (layout == NULL || number < 0 || number >= LOCALS) return 0;
+    return layout->locals[number];
+}
+
 /* --------------------------------------------------------------- the layout */
 
 cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layout_host *host) {
@@ -612,7 +681,7 @@ void cs2_layout_frame(cs2_layout *layout) {
         /* still moving */
     } else {
         layout->wait_motion = 0;
-        run(layout);
+        run_lines(layout, 1);
         /* The script has had its look at the click, so it is spent. A click
            made while the screen was waiting is still there when it wakes. */
         layout->click_left = 0;
@@ -879,7 +948,7 @@ static void run_event(cs2_layout *layout, int section, int at_index) {
     layout->line = 0;
     layout->depth = 0;
     layout->went = 0;
-    run(layout);
+    run_lines(layout, 1);
     int went = layout->went;
 
     layout->at_index = at_was;

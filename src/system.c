@@ -287,7 +287,7 @@ static const struct {
     {316, 1},  {323, 1},  {328, 1},  {329, 1},  {342, 2},  {344, 2},  {345, 2},
     {389, 1},  {402, 2},  {404, 2},  {419, 1},  {434, 2},  {455, 2},  {458, 2},
     {466, 2},  {515, 1},  {542, 2},  {572, 2},  {586, 2},  {594, 1},
-    {630, 2},  {633, 1},  {645, 2},  {646, 1},  {696, 1},  {739, 2},  {741, 1},
+    {633, 1},  {696, 1},  {739, 2},  {741, 1},
     {785, 2},  {790, 1},  {863, 1},  {866, 1},  {925, 1}
 };
 
@@ -416,6 +416,13 @@ static void forget_the_layout(cs2_system *system, cs2_plane handle) {
         system->layout_count--;
         return;
     }
+}
+
+static cs2_layout *the_layout_of(cs2_system *system, cs2_plane handle) {
+    for (size_t i = 0; i < system->layout_count; i++) {
+        if (system->layouts[i].plane == handle) return system->layouts[i].layout;
+    }
+    return NULL;
 }
 
 static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
@@ -983,6 +990,49 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
         if (plane != NULL) plane->attached = arg(arguments, argument_size, 1);
         return CS2_KCS_DONE;
+    }
+
+    /*
+     * 630, 645, 646: the system script talking to a screen it has started.
+     *
+     * The message window is not the reader's; sscript drives it, and the way
+     * it does that is a named section of meswnd.fes. 645 writes an argument
+     * into the layout's own locals, 630 runs the section by name, and 646
+     * reads a local back - so "show the window" is
+     *
+     *     645(meswnd, 0, 1); 630(meswnd, "MES_SHOW")
+     *
+     * and #MES_SHOW reads that 1 as \0. 630's third argument is a second
+     * string and its fourth the value that travels with it; the handler only
+     * passes them on when that string is not empty, and in all 104 of
+     * sscript's calls it is, so what they mean is not written here. If a game
+     * ever sends one, the log says so rather than this engine guessing.
+     */
+    case 630: {
+        cs2_layout *layout = the_layout_of(system, arg(arguments, argument_size, 0));
+        const char *command = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        const char *extra = cs2_kcs_text(script, arg(arguments, argument_size, 2));
+        if (extra != NULL && extra[0] != 0) {
+            cs2_log("%s: %s carries the string \"%s\", which is not read yet",
+                    cs2_kcs_name(script), command == NULL ? "?" : command, extra);
+        }
+        if (layout != NULL && command != NULL) cs2_layout_send(layout, command);
+        return CS2_KCS_DONE;
+    }
+
+    case 645: {
+        cs2_layout *layout = the_layout_of(system, arg(arguments, argument_size, 0));
+        int number = (int) (int32_t) arg(arguments, argument_size, 1);
+        int32_t value = (int32_t) arg(arguments, argument_size, 2);
+        cs2_layout_set_local(layout, number, value);
+        return CS2_KCS_DONE;
+    }
+
+    case 646: {
+        cs2_layout *layout = the_layout_of(system, arg(arguments, argument_size, 0));
+        int number = (int) (int32_t) arg(arguments, argument_size, 1);
+        *answer = (uint32_t) cs2_layout_local(layout, number);
+        return CS2_KCS_DONE_VALUE;
     }
 
     /* 452: what a started plane finished with; -1 for as long as it runs. */
