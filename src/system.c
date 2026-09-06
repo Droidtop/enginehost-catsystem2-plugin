@@ -1582,17 +1582,20 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE;
 
     /*
-     * 437: has the step-limited subsystem at least this many steps to go?
+     * 437: may the reading go on - has the model layer at least this much left?
      *
-     * 434, 436, 437 and 438 are one manager (Grisaia2.bin [0x8A8110]): 434
-     * gives it an unbounded budget (0x7FFFFFFF), 436 takes it to nothing, 438
-     * spends one, and 437 (0x004A6070) asks whether the budget covers n. Its
-     * first line is the one that matters here: when the manager was built with
-     * its gate word (+0x1351C, from the settings at +0xC9A0) zero, the whole of
-     * it - its worker thread, its list - was never made, and every ask answers
-     * 1. This engine does not run that subsystem, so the original's own answer
-     * for "it is not there" is the answer, and it is the one the reading state
-     * machine needs: sub-state 7 asks it before it goes on to the next line.
+     * 434, 436, 437 and 438 are one manager, Grisaia2.bin [0x8A8110], and what
+     * it manages is the game's model layer: the loader beside it (81) takes
+     * kx2, kx3 and veff, the formats the .kx2 archive holds. 434 gives it an
+     * unbounded budget (0x7FFFFFFF), 436 takes it to nothing, 438 spends one,
+     * and 437 (0x004A6070) asks whether the budget covers n.
+     *
+     * Its first line is the one that matters. The manager is built with a gate
+     * word (+0x1351C, out of the settings at +0xC9A0), and when that word is
+     * zero none of it - no worker, no list - is made and every ask answers 1.
+     * This engine draws no models, so the original's own answer for "it is not
+     * there" is the answer here, and it is the one the reading state machine
+     * waits on: sub-state 7 asks it before it goes on to the next line.
      */
     case 437:
         *answer = 1;
