@@ -53,10 +53,15 @@ static void usage(void) {
 }
 
 /* What the front end has on the screen: every layout down to the innermost. */
-static void say_the_screen(const cs2_layout *layout, const char *lead) {
-    for (; layout != NULL; layout = cs2_layout_child(layout)) {
-        cs2_log("%s%s.fes, in #%s", lead, cs2_layout_name(layout), cs2_layout_state(layout));
-        lead = "  under it, ";
+static void say_the_screen(const cs2_system *system, const char *lead) {
+    for (size_t i = 0; i < cs2_system_layout_count(system); i++) {
+        const cs2_layout *layout = cs2_system_layout_at(system, i);
+        const char *step = lead;
+        for (; layout != NULL; layout = cs2_layout_child(layout)) {
+            cs2_log("%s%s.fes, in #%s", step, cs2_layout_name(layout), cs2_layout_state(layout));
+            step = "  under it, ";
+        }
+        lead = "and over it, ";
     }
 }
 
@@ -301,7 +306,7 @@ int main(int argc, char **argv) {
                     cs2_log("frame %d: the pad", frame);
                     cs2_system_press(system, actions[i].key);
                 }
-                say_the_screen(cs2_system_layout(system), "  the front end is ");
+                say_the_screen(system, "  the front end is ");
             }
             running = cs2_kcs_frame(system_script, 2000000);
             cs2_system_frame(system);
@@ -311,7 +316,7 @@ int main(int argc, char **argv) {
                 (unsigned long long) cs2_kcs_instructions(system_script),
                 cs2_kcs_pc(system_script), running == 0 ? ", the script ended" : "");
 
-        say_the_screen(cs2_system_layout(system), "the front end is ");
+        say_the_screen(system, "the front end is ");
         const cs2_kcs *flow = cs2_system_script(system);
         if (flow != NULL) {
             cs2_log("%s: %llu instructions, stopped at %#x", cs2_kcs_name(flow),
