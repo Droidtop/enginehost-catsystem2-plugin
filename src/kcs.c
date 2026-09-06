@@ -413,8 +413,17 @@ static void push(cs2_kcs *script, uint32_t value) {
     script->sp += 4;
 }
 
+/*
+ * The original checks one thing only, that there are four bytes to take, and
+ * lets the stack run down into the globals: its own scripts do exactly that.
+ * After a call with no arguments to a function that takes its argument off the
+ * stack - sscript.kcs at 0x7E53 - the frame the call pushed is popped, written
+ * over and read back as rubbish, and the frame stays wrong until the caller's
+ * own return puts it right from marks that were never touched. Refusing that
+ * would stop the game where the game does not stop.
+ */
 static uint32_t pop(cs2_kcs *script) {
-    if (script->sp < 4u || script->sp - 4u < script->globals_size) {
+    if (script->sp < 4u) {
         fault(script, "the stack is empty");
         return 0;
     }
@@ -839,15 +848,12 @@ static int step(cs2_kcs *script) {
         script->pc = pop(script);
         if (script->fault) return -1;
         /*
-         * A return reads back the three marks the call wrote. If they are not
-         * marks the fault is here, in the frame that did not balance, and not
-         * two hundred instructions later when the stack finally runs out.
+         * The marks a return reads back are whatever the call left, and a
+         * script is allowed to have made a mess of the frame in between. Only
+         * the program counter has to be a place in the code.
          */
-        if (script->pc >= script->code_size
-            || script->frame < script->globals_size || script->frame > script->memory_size
-            || script->base < script->globals_size || script->base > script->memory_size) {
-            fault(script, "a return read back %#x, %#x, %#x, which are not a call's marks",
-                  script->pc, script->frame, script->base);
+        if (script->pc >= script->code_size) {
+            fault(script, "a return went to %#x, which is not in the code", script->pc);
             return -1;
         }
         script->sp -= argument_size;
@@ -909,7 +915,7 @@ static int step(cs2_kcs *script) {
 
     case 0x32:  /* leave: give the locals back */
         left = operand(script, &left_flags);
-        if (left > script->frame - script->globals_size) {
+        if (left > script->frame) {
             fault(script, "a frame gave back %u bytes it never took", left);
             return -1;
         }
