@@ -208,6 +208,6 @@ int cs2_startup_number(const cs2_startup *startup, const char *path, int fallbac
     if (value == NULL) return fallback;
     char *end = NULL;
     long parsed = strtol(value, &end, 10);
-    if (end == value || parsed <= 0 || parsed > 8192) return fallback;
+    if (end == value) return fallback;
     return (int) parsed;
 }
