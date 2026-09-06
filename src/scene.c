@@ -500,8 +500,8 @@ static char *append_line(char *message, const char *addition) {
 
 void cs2_scene_advance(cs2_scene *scene) {
     char *message = NULL;
-    while (scene->cursor < cs2_cst_count(scene->script)) {
-        cs2_cst_line line = cs2_cst_at(scene->script, scene->cursor++);
+    while (scene->cursor < cs2_cst_word_count(scene->script)) {
+        cs2_cst_word line = cs2_cst_word_at(scene->script, scene->cursor++);
         if (line.type == CS2_CST_NAME) {
             char *shown = cs2_text_display(scene->text, line.text);
             if (shown != NULL) {
@@ -552,14 +552,27 @@ const char *cs2_scene_text(const cs2_scene *scene) {
     return scene->message == NULL ? "" : scene->message;
 }
 size_t cs2_scene_cursor(const cs2_scene *scene) { return scene->cursor; }
-size_t cs2_scene_line_count(const cs2_scene *scene) { return cs2_cst_count(scene->script); }
 
-const char *cs2_scene_line(const cs2_scene *scene, size_t index, unsigned *type) {
-    if (scene == NULL || scene->script == NULL || index >= cs2_cst_count(scene->script)) {
+size_t cs2_scene_word_count(const cs2_scene *scene) {
+    return scene == NULL ? 0 : cs2_cst_word_count(scene->script);
+}
+
+size_t cs2_scene_line_count(const cs2_scene *scene) {
+    return scene == NULL ? 0 : cs2_cst_line_count(scene->script);
+}
+
+int cs2_scene_line_words(const cs2_scene *scene, size_t line, size_t *first, size_t *count) {
+    if (scene == NULL) return -1;
+    return cs2_cst_line_words(scene->script, line, first, count);
+}
+
+const char *cs2_scene_word(const cs2_scene *scene, size_t index, unsigned *type) {
+    if (scene == NULL || scene->script == NULL
+        || index >= cs2_cst_word_count(scene->script)) {
         return NULL;
     }
-    cs2_cst_line line = cs2_cst_at(scene->script, index);
-    if (type != NULL) *type = line.type;
-    return line.text;
+    cs2_cst_word word = cs2_cst_word_at(scene->script, index);
+    if (type != NULL) *type = word.type;
+    return word.text;
 }
 int cs2_scene_ended(const cs2_scene *scene) { return scene->ended; }

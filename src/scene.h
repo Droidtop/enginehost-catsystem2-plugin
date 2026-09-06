@@ -76,16 +76,24 @@ const char *cs2_scene_path(const cs2_scene *scene);
 const char *cs2_scene_speaker(const cs2_scene *scene);
 const char *cs2_scene_text(const cs2_scene *scene);
 size_t cs2_scene_cursor(const cs2_scene *scene);
-size_t cs2_scene_line_count(const cs2_scene *scene);
 int cs2_scene_ended(const cs2_scene *scene);
 
 /*
- * One line of the script as it stands, and what kind of line it is. The system
- * script reads the scenario's lines itself - the commands it registered are
- * handed back to it word by word - so the words have to be reachable without
+ * A script is lines, and a line is a run of words; the player walks the words
+ * in file order, and the system script asks for them as (line, word). So both
+ * counts are here, and where a line's run begins.
+ */
+size_t cs2_scene_word_count(const cs2_scene *scene);
+size_t cs2_scene_line_count(const cs2_scene *scene);
+int cs2_scene_line_words(const cs2_scene *scene, size_t line, size_t *first, size_t *count);
+
+/*
+ * One word of the script as it stands, and what kind of word it is. The system
+ * script reads the scenario itself - it asks what kind each word is and takes
+ * the text of the ones it wants - so the words have to be reachable without
  * the player having carried them out.
  */
-const char *cs2_scene_line(const cs2_scene *scene, size_t index, unsigned *type);
+const char *cs2_scene_word(const cs2_scene *scene, size_t index, unsigned *type);
 
 size_t cs2_scene_layer_count(const cs2_scene *scene);
 const cs2_layer *cs2_scene_layer_at(const cs2_scene *scene, size_t index);
