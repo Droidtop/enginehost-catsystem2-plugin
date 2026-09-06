@@ -130,6 +130,13 @@ const char *cs2_kcs_string(cs2_kcs *script, uint32_t address);
 const char *cs2_kcs_text(cs2_kcs *script, uint32_t address);
 void *cs2_kcs_at(cs2_kcs *script, uint32_t address, uint32_t size);
 
+/*
+ * How many bytes are readable from an address on, so that a handler walking a
+ * structure the script built - a run of strings one after another, say - can
+ * stop at the end of the script's memory instead of at the first zero byte.
+ */
+uint32_t cs2_kcs_room(const cs2_kcs *script, uint32_t address);
+
 /* Reading an argument block: the arguments are dwords, first at offset 0. */
 uint32_t cs2_kcs_argument(const uint8_t *arguments, uint32_t argument_size, uint32_t index);
 

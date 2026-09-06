@@ -129,13 +129,28 @@ static int first_scene_script(cs2_files *files, char *out, size_t out_size) {
 }
 
 /*
- * A screen size out of startup.xml. cs2_startup_number reads any number the
- * document holds, including the zeroes and negatives a configuration file is
- * entitled to; a screen is not one of those, so the fallback is here.
+ * The screen the game is authored for, out of its own startup.xml.
+ * cs2_startup_number reads any number the document holds, including the zeroes
+ * and negatives a configuration file is entitled to; a screen is not one of
+ * those, so a number that is not a screen counts as absent.
+ *
+ * There is no default. 1024x576 is Labyrinth of Grisaia's screen and no other
+ * game's, and quietly composing another release at Grisaia's size would put
+ * every picture in the wrong place while looking like an engine that worked.
+ * A game that does not say is a game this runner refuses to draw.
  */
-static int screen_size(const cs2_startup *startup, const char *path, int fallback) {
-    int value = cs2_startup_number(startup, path, fallback);
-    return value > 0 && value <= 8192 ? value : fallback;
+static int screen_size(const cs2_startup *startup, const char *path) {
+    int value = cs2_startup_number(startup, path, 0);
+    return value > 0 && value <= 8192 ? value : 0;
+}
+
+static int screen(const cs2_startup *startup, int *width, int *height) {
+    *width = screen_size(startup, "SCREEN/width");
+    *height = screen_size(startup, "SCREEN/height");
+    if (*width > 0 && *height > 0) return 0;
+    fprintf(stderr, "this game's startup.xml does not say what size screen it is"
+                    " authored for, and there is no size to fall back on\n");
+    return -1;
 }
 
 static int ends_with_cst(const char *name) {
@@ -255,7 +270,7 @@ int main(int argc, char **argv) {
         startup = cs2_startup_parse(document.data, document.size);
         cs2_bytes_free(&document);
     } else {
-        cs2_log("this game has no startup.xml; falling back to a 1024x576 screen");
+        cs2_log("this game has no startup.xml");
     }
 
     /*
@@ -265,8 +280,12 @@ int main(int argc, char **argv) {
      * the engine's thousand functions the boot path asks for, and in what order.
      */
     if (kcs_frames > 0) {
-        int width = screen_size(startup, "SCREEN/width", 1024);
-        int height = screen_size(startup, "SCREEN/height", 576);
+        int width, height;
+        if (screen(startup, &width, &height) != 0) {
+            cs2_startup_free(startup);
+            cs2_files_close(files);
+            return 1;
+        }
         char path[512];
         const char *entry = cs2_startup_value(startup, "SCRIPT/start");
         if (kcs_script != NULL) entry = kcs_script;
@@ -476,8 +495,8 @@ int main(int argc, char **argv) {
     const char *skipped = cs2_scene_take_skipped(scene);
     if (skipped[0] != '\0') cs2_log("commands not carried out yet: %s", skipped);
 
-    int width = screen_size(startup, "SCREEN/width", 1024);
-    int height = screen_size(startup, "SCREEN/height", 576);
+    int width, height;
+    if (screen(startup, &width, &height) != 0) return 1;
     cs2_render *render = cs2_render_new(files, width, height);
     if (render == NULL) {
         fprintf(stderr, "%s\n", cs2_error());

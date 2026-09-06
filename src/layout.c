@@ -1414,8 +1414,9 @@ void cs2_layout_click(cs2_layout *layout, int x, int y, int button) {
     if (screen == NULL) return;
     int index = hit(screen, x, y);
     if (button == 2) {
-        /* Every screen in this game asks only whether there was a right click
-           at all, so a click on nothing still has to answer something. */
+        /* _CLICK_R_ is the layout language's "was there a right click", and a
+           screen is entitled to ask only that: a right click on no button at
+           all is still a right click, so it answers -1 rather than nothing. */
         screen->click_right = index >= 0 ? (int32_t) index + 1 : -1;
         fire(screen, index, "PUSH_R");
         return;
