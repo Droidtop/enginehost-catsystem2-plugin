@@ -44,6 +44,8 @@ static void usage(void) {
         "  --press <n>:<key> press up, down, left, right, confirm or cancel on frame n;\n"
         "                    may be given more than once\n"
         "  --shot <file>     draw one frame into a PNG and exit, opening no window\n"
+        "  --dump-scene      print the scenario the way the system script reads it:\n"
+        "                    every line, its words and what kind each word is\n"
         "  --list <archive>  print an archive's entry names and exit\n"
         "  --image <names>   draw these images over one another and exit; a character\n"
         "                    is a body and a set of parts, and which suffix is which\n"
@@ -157,6 +159,7 @@ int main(int argc, char **argv) {
     int boot_given = 0;
     const char *boot_scene = NULL;
     int silent = 0;
+    int dump_scene = 0;
     int steps = 1;
     reader_action actions[READER_ACTIONS];
     int action_count = 0;
@@ -175,6 +178,7 @@ int main(int argc, char **argv) {
             boot_given = 1;
         }
         else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
+        else if (strcmp(argv[i], "--dump-scene") == 0) dump_scene = 1;
         else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
         else if (strcmp(argv[i], "--list") == 0 && i + 1 < argc) list = argv[++i];
@@ -404,6 +408,29 @@ int main(int argc, char **argv) {
     }
     cs2_log("playing %s (%zu lines)%s%s", cs2_scene_path(scene), cs2_scene_line_count(scene),
             note == NULL ? "" : "; ", note == NULL ? "" : note);
+
+    /*
+     * The scenario as the system script sees it. sscript walks a scene script
+     * by (line, word) and switches on each word own type, so reading what it
+     * reads is how a scene command that goes nowhere is found.
+     */
+    if (dump_scene) {
+        size_t lines = cs2_scene_line_count(scene);
+        for (size_t line = 0; line < lines; line++) {
+            size_t first = 0, count = 0;
+            if (cs2_scene_line_words(scene, line, &first, &count) != 0) continue;
+            for (size_t w = 0; w < count; w++) {
+                unsigned type = 0;
+                const char *word = cs2_scene_word(scene, first + w, &type);
+                printf("%3zu.%-2zu  type %02x  %s\n", line, w, type,
+                       word == NULL ? "" : word);
+            }
+        }
+        cs2_scene_free(scene);
+        cs2_text_free(text);
+        cs2_files_close(files);
+        return 0;
+    }
 
     /*
      * A drawn-and-saved frame is a still picture, so it opens no sound device;
