@@ -23,6 +23,21 @@
 
 #define DOCUMENT_LIMIT 8
 #define VARIABLE_BYTES 0x10000u
+#define SYSTEM_VARIABLES 256
+
+/*
+ * A system variable, as 210 and 211 pass them about: the scripts hand the
+ * engine a number and a value and read the value back later. The number looks
+ * like an address into the persistent block, but the scripts take it out of a
+ * table the engine fills in, so what it means is the engine's business and not
+ * the script's - which is exactly why it is kept here rather than written into
+ * the script's memory, where a number that is not an address would land on
+ * whatever happens to be at that offset.
+ */
+typedef struct {
+    uint32_t key;
+    uint32_t value;
+} system_variable;
 
 struct cs2_system {
     cs2_files *files;
@@ -36,8 +51,21 @@ struct cs2_system {
     int interpreter;
     cs2_kcs *flow;               /* the system script a started plane runs */
     cs2_plane flow_plane;
+    system_variable system_variables[SYSTEM_VARIABLES];
+    size_t system_variable_count;
     int finished;
 };
+
+static uint32_t *system_variable_at(cs2_system *system, uint32_t key, int make) {
+    for (size_t i = 0; i < system->system_variable_count; i++) {
+        if (system->system_variables[i].key == key) return &system->system_variables[i].value;
+    }
+    if (!make || system->system_variable_count >= SYSTEM_VARIABLES) return NULL;
+    system_variable *fresh = &system->system_variables[system->system_variable_count++];
+    fresh->key = key;
+    fresh->value = 0;
+    return &fresh->value;
+}
 
 cs2_system *cs2_system_new(cs2_files *files, int width, int height) {
     cs2_system *system = calloc(1, sizeof *system);
@@ -87,6 +115,10 @@ void *cs2_system_variables(cs2_system *system, uint32_t *size) {
 
 int cs2_system_finished(const cs2_system *system) {
     return system == NULL ? 0 : system->finished;
+}
+
+const cs2_kcs *cs2_system_script(const cs2_system *system) {
+    return system == NULL ? NULL : system->flow;
 }
 
 /* ------------------------------------------------------- reading arguments */
@@ -363,15 +395,19 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE_VALUE;
 
     /*
-     * 211: a system variable - its address in the persistent block and the
-     * value it starts at. The engine's own copy is that block, so this is the
-     * starting value and nothing else.
+     * 210, 211: read and write one of the system variables the interpreter
+     * keeps. The boot script sets them up and the system script reads them
+     * back - the boot type it starts on (a new game, a recollection, a saved
+     * game) is one of these.
      */
+    case 210: {
+        uint32_t *value = system_variable_at(system, arg(arguments, argument_size, 0), 0);
+        *answer = value == NULL ? 0 : *value;
+        return CS2_KCS_DONE_VALUE;
+    }
     case 211: {
-        uint32_t address = arg(arguments, argument_size, 0);
-        uint32_t value = arg(arguments, argument_size, 1);
-        uint32_t *at = cs2_kcs_at(script, address, 4);
-        if (at != NULL) memcpy(at, &value, 4);
+        uint32_t *value = system_variable_at(system, arg(arguments, argument_size, 0), 1);
+        if (value != NULL) *value = arg(arguments, argument_size, 1);
         return CS2_KCS_DONE;
     }
 

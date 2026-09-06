@@ -48,4 +48,11 @@ void *cs2_system_variables(cs2_system *system, uint32_t *size);
 /* Set when the game itself has asked to stop. */
 int cs2_system_finished(const cs2_system *system);
 
+/*
+ * The system script a started plane is running, or NULL. The runner prints
+ * where it has got to beside the boot script, because between the two of them
+ * they are the whole of the game's front end.
+ */
+const cs2_kcs *cs2_system_script(const cs2_system *system);
+
 #endif

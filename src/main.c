@@ -217,6 +217,12 @@ int main(int argc, char **argv) {
                 (unsigned long long) cs2_kcs_instructions(system_script),
                 cs2_kcs_pc(system_script), running == 0 ? ", the script ended" : "");
 
+        const cs2_kcs *flow = cs2_system_script(system);
+        if (flow != NULL) {
+            cs2_log("%s: %llu instructions, stopped at %#x", cs2_kcs_name(flow),
+                    (unsigned long long) cs2_kcs_instructions(flow), cs2_kcs_pc(flow));
+        }
+
         int result = running < 0 ? 1 : 0;
         const cs2_planes *planes = cs2_system_planes(system);
         for (size_t i = 0; i < cs2_planes_count(planes); i++) {
