@@ -61,6 +61,9 @@ const cs2_scene *cs2_system_scenario(const cs2_system *system);
  */
 void cs2_system_set_boot(cs2_system *system, int type, const char *scenario);
 
+/* The sound device the scenario plays through, or NULL for a game with none. */
+void cs2_system_set_audio(cs2_system *system, cs2_audio *audio);
+
 /*
  * The layout a started plane is running: the game's own front end, the logo
  * and the title screen and what they lead to. NULL until a plane is started.

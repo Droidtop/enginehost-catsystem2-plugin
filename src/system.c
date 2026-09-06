@@ -231,6 +231,11 @@ const cs2_scene *cs2_system_scenario(const cs2_system *system) {
     return system->scene;
 }
 
+/* The sound device, for the scenario the front end plays. */
+void cs2_system_set_audio(cs2_system *system, cs2_audio *audio) {
+    if (system != NULL) cs2_scene_set_audio(system->scene, audio);
+}
+
 void cs2_system_set_boot(cs2_system *system, int type, const char *scenario) {
     if (system == NULL) return;
     system->boot_override = 1;

@@ -105,6 +105,7 @@ int main(int argc, char **argv) {
     const char *kcs_script = NULL;
     int kcs_frames = 0;
     int boot_type = -20;
+    int boot_given = 0;
     const char *boot_scene = NULL;
     int silent = 0;
     int steps = 1;
@@ -114,8 +115,14 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') kcs_script = argv[++i];
         }
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) kcs_frames = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--boot") == 0 && i + 1 < argc) boot_type = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--boot-scene") == 0 && i + 1 < argc) boot_scene = argv[++i];
+        else if (strcmp(argv[i], "--boot") == 0 && i + 1 < argc) {
+            boot_type = atoi(argv[++i]);
+            boot_given = 1;
+        }
+        else if (strcmp(argv[i], "--boot-scene") == 0 && i + 1 < argc) {
+            boot_scene = argv[++i];
+            boot_given = 1;
+        }
         else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
         else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
@@ -205,7 +212,8 @@ int main(int argc, char **argv) {
             fprintf(stderr, "%s\n", cs2_error());
             return 1;
         }
-        cs2_system_set_boot(system, boot_type, boot_scene);
+        /* The game's own layout sets the boot type; --boot overrides it. */
+        if (boot_given) cs2_system_set_boot(system, boot_type, boot_scene);
         uint32_t variable_size = 0;
         void *variables = cs2_system_variables(system, &variable_size);
         cs2_kcs_set_variables(system_script, variables, variable_size);
