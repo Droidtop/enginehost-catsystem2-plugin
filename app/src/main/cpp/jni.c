@@ -23,6 +23,7 @@
 #include <android/log.h>
 
 #include "audio.h"
+#include "cs2.h"
 #include "files.h"
 #include "kcs.h"
 #include "render.h"
@@ -32,6 +33,12 @@
 
 #define TAG "catsystem2"
 #define INSTRUCTION_BUDGET 2000000
+
+/* The engine writes whole lines; logcat takes whole lines. */
+static void to_logcat(const char *line, void *context) {
+    (void) context;
+    __android_log_print(ANDROID_LOG_INFO, TAG, "%s", line);
+}
 
 typedef struct {
     cs2_files *files;
@@ -144,6 +151,15 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
     const char *root = (*env)->GetStringUTFChars(env, game_path, NULL);
     const char *wanted = wanted_script == NULL
         ? NULL : (*env)->GetStringUTFChars(env, wanted_script, NULL);
+
+    /*
+     * Everything the engine says goes to logcat under this plugin's own tag.
+     * Without this it goes to stderr, which Android throws away, and a run on
+     * the console can say nothing about what the game asked for: which button
+     * a tap landed on, which layout is up, which engine function came next.
+     * dq-catsystem2-24 spent a whole run unable to say why a tap did nothing.
+     */
+    cs2_log_to(to_logcat, NULL);
 
     session *state = calloc(1, sizeof *state);
     if (state == NULL) {
@@ -319,6 +335,8 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeTouch(
     (void) type;
     session *state = from_handle(handle);
     if (state == NULL) return;
+    __android_log_print(ANDROID_LOG_INFO, TAG, "a tap at %d,%d in the game's own picture",
+                        (int) x, (int) y);
     cs2_system_click(state->system, x, y, 1);
     cs2_system_event(state->system, 1);
 }
@@ -335,6 +353,13 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeKey(
     (void) type;
     session *state = from_handle(handle);
     if (state == NULL) return;
+    /*
+     * Said whatever the key turns out to be, and said before it is turned into
+     * anything, because the question a run has to answer first is whether the
+     * pad reached this file at all. Twice now a device report has had to say
+     * "the pad did nothing" without being able to say where it stopped.
+     */
+    __android_log_print(ANDROID_LOG_INFO, TAG, "the pad: key %d", (int) key);
     switch (key) {
     case 0: cs2_system_press(state->system, CS2_LAYOUT_UP); break;
     case 1: cs2_system_press(state->system, CS2_LAYOUT_DOWN); break;
