@@ -684,7 +684,7 @@ void cs2_system_frame(cs2_system *system) {
     if (system->flow == NULL) return;
     int running = cs2_kcs_frame(system->flow, 2000000);
     if (running < 0) {
-        cs2_log("kcs.int/sscript.kcs: %s", cs2_error());
+        cs2_log("%s: %s", cs2_kcs_name(system->flow), cs2_error());
     }
     if (running <= 0) host_stop_script(system);
 }

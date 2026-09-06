@@ -144,15 +144,26 @@ int cs2_files_read(cs2_files *files, const char *path, cs2_bytes *out) {
         snprintf(loose, sizeof loose, "%s/%s", folder, name);
         if (read_loose(files, loose, out) == 0) return 0;
         cs2_kif *archive = cs2_files_archive(files, normalised);
-        if (archive == NULL) {
-            cs2_set_error("this game has no %s", path);
-            return -1;
+        if (archive != NULL && cs2_kif_read(archive, name, out) == 0) return 0;
+        /*
+         * The archive a caller names is where a file belongs by convention -
+         * image.int holds the pictures, scene.int the scripts - but the
+         * convention is the engine's, not a game's, and a release is free to
+         * split a bank over image01.int and image02.int or to fold one bank
+         * into another. So the named archive is a preference, not the whole
+         * search: when it does not exist, or does not hold this entry, every
+         * archive of the game is asked for it by name.
+         */
+        for (size_t i = 0; i < files->count; i++) {
+            cs2_kif *other = cs2_files_archive(files, files->archives[i].name);
+            if (other == NULL || other == archive) continue;
+            if (!cs2_kif_contains(other, name)) continue;
+            if (cs2_kif_read(other, name, out) != 0) continue;
+            return 0;
         }
-        if (cs2_kif_read(archive, name, out) != 0) {
-            cs2_set_error("%s holds no %s", normalised, name);
-            return -1;
-        }
-        return 0;
+        cs2_set_error(archive == NULL ? "this game has no %s" : "%s is in no archive of this game",
+                      archive == NULL ? path : name);
+        return -1;
     }
 
     if (read_loose(files, normalised, out) == 0) return 0;
