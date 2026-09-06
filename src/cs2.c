@@ -31,13 +31,32 @@ void cs2_log_quiet(int value) {
     quiet = value;
 }
 
+static void (*log_sink)(const char *line, void *context);
+static void *log_context;
+
+void cs2_log_to(void (*sink)(const char *line, void *context), void *context) {
+    log_sink = sink;
+    log_context = context;
+}
+
 void cs2_log(const char *format, ...) {
     if (quiet) return;
     va_list arguments;
     va_start(arguments, format);
-    vfprintf(stderr, format, arguments);
+    if (log_sink == NULL) {
+        vfprintf(stderr, format, arguments);
+        fputc('\n', stderr);
+    } else {
+        /*
+         * A whole line at a time, because that is what a log a host keeps -
+         * Android's among them - is made of. A line longer than this is cut
+         * rather than split, so nothing arrives looking like two lines.
+         */
+        char line[1024];
+        vsnprintf(line, sizeof line, format, arguments);
+        log_sink(line, log_context);
+    }
     va_end(arguments);
-    fputc('\n', stderr);
 }
 
 uint32_t cs2_u32(const uint8_t *data, size_t size, size_t at) {
