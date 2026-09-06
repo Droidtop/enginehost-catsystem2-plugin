@@ -58,7 +58,6 @@ struct cs2_system {
     cs2_files *files;
     cs2_planes *planes;
     int width, height;
-    uint32_t event;              /* what the reader has done, nothing yet if zero */
     uint64_t frame;              /* the game's own sixty a second */
     uint8_t *variables;          /* the persistent block every script shares */
     cs2_startup *documents[DOCUMENT_LIMIT];
@@ -238,13 +237,17 @@ void cs2_system_free(cs2_system *system) {
     free(system);
 }
 
+/*
+ * The reader has asked for the next thing. A scenario on the screen advances
+ * on it, which is what reading the game is.
+ *
+ * The system script is NOT told here. It is told with an event, and an event
+ * is a block the script reads a code out of rather than a number - see the
+ * frame wait below - so a number put where a code belongs is read as one of
+ * the game's own codes and does something else entirely.
+ */
 void cs2_system_event(cs2_system *system, uint32_t event) {
-    system->event = event;
-    /*
-     * The reader has asked for the next thing. The system script is told too -
-     * it is what decides whether the click belongs to a menu - but a scenario
-     * on the screen advances on it, which is what reading the game is.
-     */
+    (void) event;
     if (system->scene_loaded) system->scene_step = 1;
 }
 
@@ -339,19 +342,32 @@ static cs2_plane_state *plane_of(cs2_system *system, const uint8_t *arguments,
  * is a loop around this call: ask, and if nothing happened run one step of the
  * screen it is showing.
  */
-static int wait_for_the_reader(cs2_system *system, cs2_kcs *script,
+static int wait_for_the_reader(cs2_kcs *script,
                                const uint8_t *arguments, uint32_t argument_size) {
     uint32_t where = arg(arguments, argument_size, 0);
     cs2_kcs_suspend(script, where);
-    if (system->event != 0) {
-        uint32_t *at = cs2_kcs_at(script, where, 4);
-        if (at != NULL) {
-            uint32_t event = system->event;
-            memcpy(at, &event, 4);
-            cs2_kcs_answer(script, 1);
-        }
-        system->event = 0;
-    }
+    /*
+     * Nothing is handed back yet, and what used to be is worse than nothing.
+     *
+     * An event is not a number, it is a block: sscript reads the word at
+     * offset 4 of it and switches on that, with more of the event at 8 and 12.
+     * Writing a bare 1 at offset 0 left the code reading as zero, and zero is
+     * the game's "load a save", so every tap while a scene was up answered
+     *
+     *     sscript load failed >
+     *
+     * rather than turning the page. The codes are the game's own: 0xFFFF0003
+     * and the rest are what a layout's "send" posts - meswnd.fes has thirteen
+     * of them, "send 0xffff0003 0 20" for load and so on - and 0, 1, 2 are the
+     * engine's own save and load. So events belong with "send", and until that
+     * is written this call says only that the frame is over, which is what the
+     * front end has always had from it.
+     *
+     * Every script waiting here would have to be told, not the first to ask:
+     * both of the game's scripts wait at this call at once, and the handler at
+     * 0x50F8D0 hands the address to a slot at [script + 0x70], which belongs
+     * to the script and not to the engine.
+     */
     return CS2_KCS_DONE_YIELD_AGAIN;
 }
 
@@ -709,7 +725,7 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE_VALUE;
 
     case 71:
-        return wait_for_the_reader(system, script, arguments, argument_size);
+        return wait_for_the_reader(script, arguments, argument_size);
 
     /* 79: how big a plane is, as the floats the script works in. */
     case 79: {
