@@ -33,6 +33,14 @@ typedef struct {
 /* Decodes one frame, counting from zero. Returns 0, or -1 with an error set. */
 int cs2_hg3_decode(const uint8_t *file, size_t size, int frame_index, cs2_hg3_frame *out);
 
+/*
+ * Decodes the frame carrying a given id. Every frame in the chain has one - the
+ * word after the link - and it is the number, not the position, that the game's
+ * own UI layouts address an image by: title.fes asks for ids 0 to 5 for the
+ * background and 100, 110, 200, 1100 and so on for the buttons.
+ */
+int cs2_hg3_decode_id(const uint8_t *file, size_t size, int id, cs2_hg3_frame *out);
+
 /* How many frames the file holds, which is an animation's length. */
 int cs2_hg3_frame_count(const uint8_t *file, size_t size);
 

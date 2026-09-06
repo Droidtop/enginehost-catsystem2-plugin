@@ -338,6 +338,25 @@ int cs2_hg3_decode(const uint8_t *file, size_t size, int frame_index, cs2_hg3_fr
     }
 }
 
+int cs2_hg3_decode_id(const uint8_t *file, size_t size, int id, cs2_hg3_frame *out) {
+    memset(out, 0, sizeof *out);
+    size_t frame;
+    if (first_frame(file, size, &frame) != 0) return -1;
+    for (;;) {
+        if (check(frame + 8, size, "HG-3 frame") != 0) return -1;
+        uint32_t next = cs2_u32(file, size, frame);
+        if ((int32_t) cs2_u32(file, size, frame + 4) == id) {
+            return decode_frame(file, size, frame + 8, out);
+        }
+        if (next == 0) {
+            cs2_set_error("this HG-3 image has no frame with id %d", id);
+            return -1;
+        }
+        frame += next;
+        if (check(frame, size, "HG-3 frame chain") != 0) return -1;
+    }
+}
+
 void cs2_hg3_frame_free(cs2_hg3_frame *frame) {
     if (frame == NULL) return;
     free(frame->pixels);
