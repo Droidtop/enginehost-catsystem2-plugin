@@ -410,6 +410,46 @@ static void replace_all(const char *src, const char *find, const char *with,
 }
 
 /* Puts a string where the script asked for it. */
+/*
+ * The game's string list, which is one buffer holding several strings one
+ * after another (0x00558F00). A run of separators becomes ONE end mark however
+ * long the run is, a separator at the front is passed over, and the whole ends
+ * with two of them - so "a,,b," is the two strings "a" and "b" and nothing
+ * else. Answers how many bytes were written, the two end marks included.
+ */
+static size_t list_build(const char *src, const char *separators, char *out, size_t out_size) {
+    size_t at = 0;
+    int ended = 1;                 /* the last thing written ended a string */
+    for (; *src != 0 && at + 2 < out_size; src++) {
+        if (strchr(separators, *src) == NULL) {
+            out[at++] = *src;
+            ended = 0;
+        } else if (!ended) {
+            out[at++] = 0;
+            ended = 1;
+        }
+    }
+    out[at++] = 0;
+    out[at++] = 0;
+    return at;
+}
+
+/*
+ * One string out of such a list (0x00558C00): walking past `index` end marks,
+ * answering nothing when the walk runs off the end or lands on an empty
+ * string. `size` bounds the walk, because a list is read out of the script's
+ * own memory and a script is not to be trusted to have ended one.
+ */
+static const char *list_field(const char *list, size_t size, uint32_t index) {
+    size_t at = 0;
+    for (uint32_t seen = 0; seen < index; seen++) {
+        while (at < size && list[at] != 0) at++;
+        if (at >= size) return NULL;
+        at++;                      /* over the end mark */
+    }
+    return (at < size && list[at] != 0) ? list + at : NULL;
+}
+
 static void write_text(cs2_kcs *script, uint32_t address, const char *text) {
     size_t length = strlen(text) + 1;
     char *out = cs2_kcs_at(script, address, (uint32_t) length);
@@ -1045,6 +1085,79 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         system->scene_loaded = 1;
         system->scene_step = 1;
         *answer = 1;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 41 and 42: the game's string list, and 47, which counts what a reader
+     * would call a character. sscript splits an argument with 41 - `pcm` and
+     * the layer commands hand it a comma - and takes the pieces back out with
+     * 42 one at a time.
+     *
+     * 41(list, text, separators) builds the list; 42(destination, list, index)
+     * copies one string out of it and answers whether that string had anything
+     * in it. A list is left in the script's own memory, so 42 reads it back
+     * from there rather than from anything this engine remembered.
+     */
+    case 41: {
+        const char *src = cs2_kcs_string(script, arg(arguments, argument_size, 1));
+        const char *separators = cs2_kcs_string(script, arg(arguments, argument_size, 2));
+        char built[TEXT_BYTES];
+        size_t written = list_build(src == NULL ? "" : src,
+                                    separators == NULL ? "" : separators,
+                                    built, sizeof built);
+        uint32_t destination = arg(arguments, argument_size, 0);
+        char *out = cs2_kcs_at(script, destination, (uint32_t) written);
+        if (out != NULL) memcpy(out, built, written);
+        return CS2_KCS_DONE;
+    }
+    case 42: {
+        uint32_t list_address = arg(arguments, argument_size, 1);
+        const char *list = cs2_kcs_at(script, list_address, 1);
+        size_t room = cs2_kcs_room(script, list_address);
+        const char *field = list == NULL ? NULL
+            : list_field(list, room, arg(arguments, argument_size, 2));
+        write_text(script, arg(arguments, argument_size, 0), field == NULL ? "" : field);
+        *answer = (uint32_t) (field != NULL);
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 47: how many characters a string holds, not how many bytes. The original
+     * walks CP932, where a lead byte and the byte after it are one character
+     * (0x005095C0 over 0x00558260); this engine holds the same text as UTF-8,
+     * so the same count is the bytes that are not continuation bytes. It is
+     * the reader's count either way, which is what the caller wanted.
+     */
+    case 47: {
+        const char *text = cs2_kcs_string(script, arg(arguments, argument_size, 0));
+        uint32_t count = 0;
+        for (const unsigned char *at = (const unsigned char *) (text == NULL ? "" : text);
+             *at != 0; at++) {
+            if ((*at & 0xC0u) != 0x80u) count++;
+        }
+        *answer = count;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 598: the first field of a comma-separated string, into the address the
+     * second argument names, answering whether there was one (0x00518D60).
+     *
+     * It is NOT the image resolve this engine had it down as. sscript uses it
+     * on a layer's picture name before asking 597 for that background's tone
+     * out of config.int/bgtone.tbl, which is a table Labyrinth of Grisaia does
+     * not ship - so 594 hands back no table, 597 answers 0 for every name, and
+     * the tone block sscript skips is a block the original skips too. Nothing
+     * about a background's picture passes through here.
+     */
+    case 598: {
+        const char *text = cs2_kcs_text(script, arg(arguments, argument_size, 0));
+        char built[TEXT_BYTES];
+        size_t written = list_build(text == NULL ? "" : text, ",", built, sizeof built);
+        const char *first = list_field(built, written, 0);
+        if (first != NULL) write_text(script, arg(arguments, argument_size, 1), first);
+        *answer = (uint32_t) (first != NULL);
         return CS2_KCS_DONE_VALUE;
     }
 

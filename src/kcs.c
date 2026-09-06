@@ -382,6 +382,15 @@ const char *cs2_kcs_text(cs2_kcs *script, uint32_t address) {
     return out;
 }
 
+uint32_t cs2_kcs_room(const cs2_kcs *script, uint32_t address) {
+    if (address & 0x80000000u) {
+        uint32_t at = address & 0x7FFFFFFFu;
+        return (script->saved == NULL || at >= script->saved_size) ? 0
+            : script->saved_size - at;
+    }
+    return address >= script->memory_size ? 0 : script->memory_size - address;
+}
+
 const char *cs2_kcs_string(cs2_kcs *script, uint32_t address) {
     uint8_t *at = cs2_kcs_at(script, address, 1);
     if (at == NULL) return NULL;
