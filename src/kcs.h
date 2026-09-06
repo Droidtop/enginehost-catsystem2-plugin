@@ -95,6 +95,13 @@ int cs2_kcs_frame(cs2_kcs *script, uint32_t budget);
 /* What the script has run so far, and where it is; for logs and for save. */
 uint64_t cs2_kcs_instructions(const cs2_kcs *script);
 uint32_t cs2_kcs_pc(const cs2_kcs *script);
+
+/*
+ * Where the call being run keeps its arguments and its locals. The game's own
+ * string formatting names a variable by bank and offset, and its "L" bank is
+ * counted from here, exactly as the frameaddr opcode counts.
+ */
+uint32_t cs2_kcs_base(const cs2_kcs *script);
 const char *cs2_kcs_name(const cs2_kcs *script);
 
 /*
@@ -102,6 +109,16 @@ const char *cs2_kcs_name(const cs2_kcs *script);
  * address into it, and so is anything a handler is asked to write back.
  */
 const char *cs2_kcs_string(cs2_kcs *script, uint32_t address);
+
+/*
+ * The same string with the game's own formatting expanded: a printf conversion
+ * followed by the variable that fills it, as "plane %d[L12]" or
+ * "config.int/%s[L280]". Every name, path and message an engine function is
+ * given comes through here, because that is where the game expands it; only
+ * the plain copy reads a string as it lies. The answer holds until a few more
+ * strings have been asked for.
+ */
+const char *cs2_kcs_text(cs2_kcs *script, uint32_t address);
 void *cs2_kcs_at(cs2_kcs *script, uint32_t address, uint32_t size);
 
 /* Reading an argument block: the arguments are dwords, first at offset 0. */

@@ -24,6 +24,8 @@
 #define DOCUMENT_LIMIT 8
 #define VARIABLE_BYTES 0x10000u
 #define SYSTEM_VARIABLES 256
+#define SYSTEM_STRINGS 128
+#define STRING_BYTES 260
 
 /*
  * A system variable, as 210 and 211 pass them about: the scripts hand the
@@ -39,6 +41,17 @@ typedef struct {
     uint32_t value;
 } system_variable;
 
+/*
+ * The game's other bank of variables: strings by number. adv.xml gives the
+ * numbers names - the file a new game starts on is string 200, the window
+ * theme 800 - and a script reaches one by writing "$str200" into a buffer and
+ * asking function 278 to resolve it.
+ */
+typedef struct {
+    uint32_t key;
+    char value[STRING_BYTES];
+} system_string;
+
 struct cs2_system {
     cs2_files *files;
     cs2_planes *planes;
@@ -53,6 +66,8 @@ struct cs2_system {
     cs2_plane flow_plane;
     system_variable system_variables[SYSTEM_VARIABLES];
     size_t system_variable_count;
+    system_string system_strings[SYSTEM_STRINGS];
+    size_t system_string_count;
     int finished;
 };
 
@@ -65,6 +80,32 @@ static uint32_t *system_variable_at(cs2_system *system, uint32_t key, int make) 
     fresh->key = key;
     fresh->value = 0;
     return &fresh->value;
+}
+
+static system_string *system_string_at(cs2_system *system, uint32_t key, int make) {
+    for (size_t i = 0; i < system->system_string_count; i++) {
+        if (system->system_strings[i].key == key) return &system->system_strings[i];
+    }
+    if (!make || system->system_string_count >= SYSTEM_STRINGS) return NULL;
+    system_string *fresh = &system->system_strings[system->system_string_count++];
+    fresh->key = key;
+    fresh->value[0] = 0;
+    return fresh;
+}
+
+void cs2_system_set_string(cs2_system *system, uint32_t number, const char *text) {
+    system_string *slot = system_string_at(system, number, 1);
+    if (slot != NULL) snprintf(slot->value, sizeof slot->value, "%s", text == NULL ? "" : text);
+}
+
+const char *cs2_system_string(cs2_system *system, uint32_t number) {
+    const system_string *slot = system_string_at(system, number, 0);
+    return slot == NULL ? NULL : slot->value;
+}
+
+void cs2_system_set_variable(cs2_system *system, uint32_t key, uint32_t value) {
+    uint32_t *slot = system_variable_at(system, key, 1);
+    if (slot != NULL) *slot = value;
 }
 
 cs2_system *cs2_system_new(cs2_files *files, int width, int height) {
@@ -223,10 +264,68 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     cs2_system *system = context;
     switch (id) {
 
-    /* 1: say something. The script's own diagnostics, in its own words. */
+    /*
+     * 1: say something. The script's own diagnostics, written in the game's own
+     * format notation - "sscript loaded > %s[L20]" - so they go through the
+     * same formatting as 14.
+     */
     case 1: {
-        const char *message = cs2_kcs_string(script, arg(arguments, argument_size, 0));
-        if (message != NULL) cs2_log("%s: %s", cs2_kcs_name(script), message);
+        const char *message = cs2_kcs_text(script, arg(arguments, argument_size, 0));
+        if (message != NULL) {
+            cs2_log("%s: %s", cs2_kcs_name(script), message);
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /*
+     * 14: write a string with something in it, into the script's own memory.
+     * Until this was written the game's plane names read "plane %d[L12]".
+     */
+    case 14: {
+        uint32_t destination = arg(arguments, argument_size, 0);
+        const char *written = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        if (written == NULL) written = "";
+        size_t length = strlen(written) + 1;
+        char *at = cs2_kcs_at(script, destination, (uint32_t) length);
+        if (at != NULL) memcpy(at, written, length);
+        *answer = destination;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /* 277: write one of the game's numbered strings into the script's memory. */
+    case 277: {
+        uint32_t number = arg(arguments, argument_size, 0);
+        uint32_t destination = arg(arguments, argument_size, 1);
+        const char *value = cs2_system_string(system, number);
+        if (value == NULL) value = "";
+        size_t length = strlen(value) + 1;
+        char *at = cs2_kcs_at(script, destination, (uint32_t) length);
+        if (at != NULL) memcpy(at, value, length);
+        return CS2_KCS_DONE;
+    }
+
+    /*
+     * 278: resolve a reference to one of those strings, in place. The script
+     * writes "$str200" into a buffer with 14 and hands the buffer here; what
+     * comes back is the string that number holds - for 200, the file a new
+     * game starts on.
+     */
+    case 278: {
+        uint32_t address = arg(arguments, argument_size, 0);
+        const char *reference = cs2_kcs_text(script, address);
+        if (reference == NULL || strncmp(reference, "$str", 4) != 0) return CS2_KCS_DONE;
+        char *end = NULL;
+        unsigned long number = strtoul(reference + 4, &end, 10);
+        if (end == reference + 4) return CS2_KCS_DONE;
+        const char *value = cs2_system_string(system, (uint32_t) number);
+        if (value == NULL) {
+            cs2_log("%s: the game has no string %lu to put in %s", cs2_kcs_name(script),
+                    number, reference);
+            value = "";
+        }
+        size_t length = strlen(value) + 1;
+        char *at = cs2_kcs_at(script, address, (uint32_t) length);
+        if (at != NULL) memcpy(at, value, length);
         return CS2_KCS_DONE;
     }
 
@@ -278,7 +377,7 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     case 66: {
         int type = (int) arg(arguments, argument_size, 0);
         cs2_plane parent = arg(arguments, argument_size, 1);
-        const char *name = cs2_kcs_string(script, arg(arguments, argument_size, 2));
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 2));
         *answer = cs2_plane_create(system->planes, type, parent, name);
         return CS2_KCS_DONE_VALUE;
     }
@@ -413,7 +512,7 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
 
     /* 247: one of the game's own data files, or nothing when it is not there. */
     case 247: {
-        const char *name = cs2_kcs_string(script, arg(arguments, argument_size, 0));
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 0));
         cs2_bytes content = {0};
         if (name != NULL && cs2_files_read(system->files, name, &content) == 0) {
             cs2_bytes_free(&content);
@@ -464,7 +563,7 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
 
     /* 400: where a piece of music loops, out of the game's own list. */
     case 400: {
-        const char *path = cs2_kcs_string(script, arg(arguments, argument_size, 1));
+        const char *path = cs2_kcs_text(script, arg(arguments, argument_size, 1));
         cs2_bytes content = {0};
         if (path == NULL || cs2_files_read(system->files, path, &content) != 0) {
             cs2_log("%s: the music loop points (%s) are not in this game",
@@ -478,7 +577,7 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     /* 447: the layout a plane draws itself from, a .fes in the game's own set. */
     case 447: {
         cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
-        const char *name = cs2_kcs_string(script, arg(arguments, argument_size, 1));
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
         if (plane != NULL && name != NULL) {
             snprintf(plane->layout, sizeof plane->layout, "%s", name);
         }
@@ -513,7 +612,7 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
 
     /* 590, 591, 592: one of the game's configuration documents. */
     case 590: {
-        const char *path = cs2_kcs_string(script, arg(arguments, argument_size, 0));
+        const char *path = cs2_kcs_text(script, arg(arguments, argument_size, 0));
         cs2_bytes document = {0};
         *answer = 0;
         if (path == NULL || cs2_files_read(system->files, path, &document) != 0) {
@@ -542,7 +641,7 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     case 592: {
         uint32_t handle = arg(arguments, argument_size, 0);
         int fallback = (int) (int32_t) arg(arguments, argument_size, 1);
-        const char *path = cs2_kcs_string(script, arg(arguments, argument_size, 2));
+        const char *path = cs2_kcs_text(script, arg(arguments, argument_size, 2));
         const cs2_startup *document = handle >= 1 && handle <= DOCUMENT_LIMIT
             ? system->documents[handle - 1] : NULL;
         *answer = (uint32_t) (int32_t) (path == NULL ? fallback

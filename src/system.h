@@ -42,6 +42,16 @@ void cs2_system_frame(cs2_system *system);
 /* The screen as the scripts have built it, for drawing and for logs. */
 const cs2_planes *cs2_system_planes(const cs2_system *system);
 
+/*
+ * The game's two banks of variables by number, which adv.xml gives names to:
+ * the numbered flags a script reads with 210 and writes with 211, and the
+ * numbered strings it resolves with 278. Whatever starts the game sets the ones
+ * the system script boots on - the boot type, and the file it starts from.
+ */
+void cs2_system_set_variable(cs2_system *system, uint32_t key, uint32_t value);
+void cs2_system_set_string(cs2_system *system, uint32_t number, const char *text);
+const char *cs2_system_string(cs2_system *system, uint32_t number);
+
 /* The persistent variables every script in the game shares. */
 void *cs2_system_variables(cs2_system *system, uint32_t *size);
 
