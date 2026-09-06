@@ -70,6 +70,15 @@ void cs2_system_set_audio(cs2_system *system, cs2_audio *audio);
  */
 const cs2_layout *cs2_system_layout(const cs2_system *system);
 
+/*
+ * The reader, at the front end. A tap or a click goes to the screen the
+ * layouts have up, in the game's own screen pixels, and the pad walks that
+ * screen's buttons; what a click means is entirely the layout's business.
+ */
+void cs2_system_pointer(cs2_system *system, int x, int y);
+void cs2_system_click(cs2_system *system, int x, int y, int button);
+void cs2_system_press(cs2_system *system, cs2_layout_key key);
+
 /* The whole screen the front end has built: the planes and their layouts. */
 void cs2_system_draw(cs2_system *system, uint32_t *canvas, int width, int height);
 

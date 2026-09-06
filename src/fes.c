@@ -144,6 +144,9 @@ static cs2_fes_object *object_make(cs2_fes *fes, const char *name, int index,
     for (int i = 0; i < CS2_FES_IDS; i++) object->ids[i] = -1;
     object->disp = 0;
     object->enable = 1;
+    object->block = -1;
+    object->column = -1;
+    object->row = -1;
     return object;
 }
 
@@ -188,6 +191,15 @@ static void set_column(cs2_fes_object *object, const char *column, const char *v
         object->disp = atoi(value);
     } else if (strcmp(column, "ENABLE") == 0) {
         object->enable = atoi(value);
+    } else if (strcmp(column, "KEYBLOCK") == 0) {
+        /* "grid,column,row" - which of the layout's button grids this one is
+           in and where in it, which is the whole of how a pad moves. */
+        int grid = -1, at_column = -1, at_row = -1;
+        if (sscanf(value, "%d,%d,%d", &grid, &at_column, &at_row) == 3) {
+            object->block = grid;
+            object->column = at_column;
+            object->row = at_row;
+        }
     }
     /* VRAM is where the surface is put in the game's own texture sheet, and
        GROUP, STYPE, CHANNEL, COLOR and MASK belong to sound and to drawing
@@ -248,8 +260,13 @@ static int parse(cs2_fes *fes) {
                 continue;
             }
             if (strcmp(word, "SUBCOMMAND") == 0 || strcmp(word, "KEYBLOCK") == 0) {
-                /* The motion table and the pad's own button grid: read past
-                   until the layout runtime carries them out. */
+                /*
+                 * The motion table, and the header of the button grids - how
+                 * many there are and which grid each edge leads to. Grisaia's
+                 * grids all lead nowhere ("-1,-1,-1,-1"), and where a button
+                 * sits in its grid is in the KEYBLOCK column of the object
+                 * table, which is read, so this header is read past.
+                 */
                 mode = NONE;
                 continue;
             }

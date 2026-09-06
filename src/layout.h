@@ -46,11 +46,52 @@ void cs2_layout_free(cs2_layout *layout);
 
 const char *cs2_layout_name(const cs2_layout *layout);
 
+/* The screen this one has started under itself with execfes, or NULL. */
+const cs2_layout *cs2_layout_child(const cs2_layout *layout);
+
 /* One frame of this layout and of whatever it has started under itself. */
 void cs2_layout_frame(cs2_layout *layout);
 
 /* What it finished with, or -1 for as long as it runs. */
 int cs2_layout_result(const cs2_layout *layout);
+
+/*
+ * The reader.
+ *
+ * A screen reads a click as the button itself - the title screen is written
+ * "if (_CLICK_L_==btn_j[0])" - so what these do is decide which of the
+ * layout's own buttons the reader has just named, and the layout's own script
+ * does the rest. A button is a rectangle its picture's own size and offset,
+ * enabled or not by the screen, and the topmost enabled one under the point
+ * wins; the invisible btn_j row of the title screen sits over the visible
+ * btn_d row for exactly that reason.
+ *
+ * The pad walks the KEYBLOCK grids instead: focus moves by column and row
+ * inside the grid the enabled buttons are in, confirm clicks what is focused
+ * and cancel is the right button. Moving focus runs the button's own
+ * #<name>.FOCUS and #<name>.UNFOCUS sections, which is how the game lights a
+ * button up, and a click runs its #<name>.PUSH_L.
+ *
+ * All of them go to the innermost layout - the screen the reader is looking
+ * at, which is the one a parent layout started with execfes.
+ */
+typedef enum {
+    CS2_LAYOUT_UP,
+    CS2_LAYOUT_DOWN,
+    CS2_LAYOUT_LEFT,
+    CS2_LAYOUT_RIGHT,
+    CS2_LAYOUT_CONFIRM,
+    CS2_LAYOUT_CANCEL
+} cs2_layout_key;
+
+/* Where the reader is pointing, in the game's own screen pixels. */
+void cs2_layout_pointer(cs2_layout *layout, int x, int y);
+
+/* A click there: 1 the left button or a tap, 2 the right button. */
+void cs2_layout_click(cs2_layout *layout, int x, int y, int button);
+
+/* The pad. */
+void cs2_layout_press(cs2_layout *layout, cs2_layout_key key);
 
 /*
  * Draws the layout and its children onto an ARGB canvas, in priority order.

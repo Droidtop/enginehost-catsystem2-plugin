@@ -41,6 +41,14 @@ int cs2_hg3_decode(const uint8_t *file, size_t size, int frame_index, cs2_hg3_fr
  */
 int cs2_hg3_decode_id(const uint8_t *file, size_t size, int id, cs2_hg3_frame *out);
 
+/*
+ * The frame's box alone - its size and where it sits - without unpacking a
+ * pixel of it. A .fes button's hit area is its own image's stdinfo, so a
+ * pointer test asks for this rather than for the picture: `pixels` is left
+ * NULL and nothing is allocated.
+ */
+int cs2_hg3_bounds_id(const uint8_t *file, size_t size, int id, cs2_hg3_frame *out);
+
 /* How many frames the file holds, which is an animation's length. */
 int cs2_hg3_frame_count(const uint8_t *file, size_t size);
 

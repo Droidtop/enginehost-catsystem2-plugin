@@ -39,6 +39,10 @@ static void usage(void) {
         "  --script <name>   play this script instead of the game's own entry point,\n"
         "                    as \"ama_001.cst\" or \"scene.int/ama_001.cst\"\n"
         "  --steps <n>       advance n times before showing anything (default 1)\n"
+        "  --tap <n>:<x>,<y> tap the front end at that place on frame n, as the reader\n"
+        "                    does; may be given more than once\n"
+        "  --press <n>:<key> press up, down, left, right, confirm or cancel on frame n;\n"
+        "                    may be given more than once\n"
         "  --shot <file>     draw one frame into a PNG and exit, opening no window\n"
         "  --list <archive>  print an archive's entry names and exit\n"
         "  --image <names>   draw these images over one another and exit; a character\n"
@@ -46,6 +50,46 @@ static void usage(void) {
         "                    is learnt by looking\n"
         "  --silent          play the scene without opening a sound device\n"
         "  --quiet           say nothing but what was asked for\n");
+}
+
+/* What the front end has on the screen: every layout down to the innermost. */
+static void say_the_screen(const cs2_layout *layout, const char *lead) {
+    for (; layout != NULL; layout = cs2_layout_child(layout)) {
+        cs2_log("%s%s.fes, in #%s", lead, cs2_layout_name(layout), cs2_layout_state(layout));
+        lead = "  under it, ";
+    }
+}
+
+/*
+ * What the reader does, written down in advance.
+ *
+ * The front end is a screen that answers taps, and a run with no window has to
+ * be able to answer it, so --tap and --press say what happens on which frame.
+ * That is what makes "New Game starts the first scene" something a build can
+ * be held to rather than something a person has to watch.
+ */
+#define READER_ACTIONS 32
+
+typedef struct {
+    int frame;
+    int tap;                 /* a tap at x,y; otherwise a key */
+    int x, y;
+    cs2_layout_key key;
+} reader_action;
+
+static int reader_key(const char *name, cs2_layout_key *out) {
+    static const struct { const char *name; cs2_layout_key key; } keys[] = {
+        { "up", CS2_LAYOUT_UP }, { "down", CS2_LAYOUT_DOWN },
+        { "left", CS2_LAYOUT_LEFT }, { "right", CS2_LAYOUT_RIGHT },
+        { "confirm", CS2_LAYOUT_CONFIRM }, { "cancel", CS2_LAYOUT_CANCEL },
+    };
+    for (size_t i = 0; i < sizeof keys / sizeof *keys; i++) {
+        if (strcmp(name, keys[i].name) == 0) {
+            *out = keys[i].key;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 /*
@@ -109,6 +153,8 @@ int main(int argc, char **argv) {
     const char *boot_scene = NULL;
     int silent = 0;
     int steps = 1;
+    reader_action actions[READER_ACTIONS];
+    int action_count = 0;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--kcs") == 0) {
             if (kcs_frames == 0) kcs_frames = 60;
@@ -128,6 +174,25 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
         else if (strcmp(argv[i], "--list") == 0 && i + 1 < argc) list = argv[++i];
         else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) images = argv[++i];
+        else if (strcmp(argv[i], "--tap") == 0 && i + 1 < argc) {
+            reader_action action = {0};
+            action.tap = 1;
+            if (sscanf(argv[++i], "%d:%d,%d", &action.frame, &action.x, &action.y) != 3) {
+                fprintf(stderr, "--tap wants <frame>:<x>,<y>\n");
+                return 2;
+            }
+            if (action_count < READER_ACTIONS) actions[action_count++] = action;
+        }
+        else if (strcmp(argv[i], "--press") == 0 && i + 1 < argc) {
+            reader_action action = {0};
+            char name[32] = "";
+            if (sscanf(argv[++i], "%d:%31s", &action.frame, name) != 2
+                || reader_key(name, &action.key) != 0) {
+                fprintf(stderr, "--press wants <frame>:<up|down|left|right|confirm|cancel>\n");
+                return 2;
+            }
+            if (action_count < READER_ACTIONS) actions[action_count++] = action;
+        }
         else if (strcmp(argv[i], "--silent") == 0) silent = 1;
         else if (strcmp(argv[i], "--quiet") == 0) cs2_log_quiet(1);
         else {
@@ -227,6 +292,17 @@ int main(int argc, char **argv) {
          */
         int running = 1, frame = 0;
         for (; running == 1 && frame < kcs_frames && !cs2_system_finished(system); frame++) {
+            for (int i = 0; i < action_count; i++) {
+                if (actions[i].frame != frame) continue;
+                if (actions[i].tap) {
+                    cs2_log("frame %d: a tap at %d,%d", frame, actions[i].x, actions[i].y);
+                    cs2_system_click(system, actions[i].x, actions[i].y, 1);
+                } else {
+                    cs2_log("frame %d: the pad", frame);
+                    cs2_system_press(system, actions[i].key);
+                }
+                say_the_screen(cs2_system_layout(system), "  the front end is ");
+            }
             running = cs2_kcs_frame(system_script, 2000000);
             cs2_system_frame(system);
         }
@@ -235,11 +311,7 @@ int main(int argc, char **argv) {
                 (unsigned long long) cs2_kcs_instructions(system_script),
                 cs2_kcs_pc(system_script), running == 0 ? ", the script ended" : "");
 
-        const cs2_layout *layout = cs2_system_layout(system);
-        if (layout != NULL) {
-            cs2_log("the front end is %s.fes, in #%s", cs2_layout_name(layout),
-                    cs2_layout_state(layout));
-        }
+        say_the_screen(cs2_system_layout(system), "the front end is ");
         const cs2_kcs *flow = cs2_system_script(system);
         if (flow != NULL) {
             cs2_log("%s: %llu instructions, stopped at %#x", cs2_kcs_name(flow),
