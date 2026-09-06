@@ -28,6 +28,8 @@
 #define VARIABLE_BYTES 0x10000u
 #define SYSTEM_VARIABLES 256
 #define SYSTEM_STRINGS 128
+#define NAMED_NUMBERS 512
+#define NAME_BYTES 32
 
 /*
  * A system variable, as 210 and 211 pass them about: the scripts hand the
@@ -53,6 +55,19 @@ typedef struct {
     uint32_t key;
     char *value;                 /* a line of dialogue is as long as it is */
 } system_string;
+
+/*
+ * A name the system script has given a number to. 517 puts one in, 518 takes
+ * it out, and the table it goes in is named by the script own object, so the
+ * scene commands and the motion names do not share one. This is how a scene
+ * script command is dispatched: sscript registers all 259 of its command
+ * names against their own numbers, then looks each command up by name.
+ */
+typedef struct {
+    uint32_t table;
+    char name[NAME_BYTES];
+    int32_t number;
+} named_number;
 
 struct cs2_system {
     cs2_files *files;
@@ -87,6 +102,8 @@ struct cs2_system {
     size_t system_variable_count;
     system_string system_strings[SYSTEM_STRINGS];
     size_t system_string_count;
+    named_number names[NAMED_NUMBERS];
+    size_t name_count;
     int finished;
 };
 
@@ -306,6 +323,112 @@ static const struct {
     {633, 1},  {696, 1},  {739, 2},  {741, 1},
     {785, 2},  {790, 1},  {863, 1},  {866, 1},  {925, 1}
 };
+
+/* ------------------------------------------------------- strings by hand */
+
+/*
+ * The three string helpers the scene-command dispatcher is built out of, each
+ * written from its own handler. They are here rather than in a string module
+ * because the shapes are the game own and not general: a token is what its
+ * tokeniser calls a token, brackets and all.
+ */
+#define TEXT_BYTES 4096
+
+/*
+ * Splits a line the way the game does (0x00558DC0): a run of delimiters ends
+ * one token, and a bracketed group is ONE token however many delimiters are
+ * inside it, so "(1 + 2)" is a single argument. A group written "(:...)" is
+ * handed on without its own brackets. Answers how many tokens were written,
+ * and fills each of them into out, one after another.
+ */
+static size_t tokenise(const char *src, char *out, size_t out_size, size_t *starts,
+                       size_t start_limit) {
+    size_t count = 0, at = 0;
+    int ended = 1;                 /* the last thing written closed a token */
+    char previous = 0;
+    for (size_t i = 0; src[i] != 0 && at + 2 < out_size;) {
+        if (src[i] == 0x28) {      /* a bracketed group */
+            size_t depth = 0, end = i;
+            while (src[end] != 0) {
+                if (src[end] == 0x28) depth++;
+                else if (src[end] == 0x29) { end++; if (--depth == 0) break; continue; }
+                end++;
+            }
+            /*
+             * After a letter it is a fresh token - "if (a==1)" is two - but
+             * after anything else it belongs to what is being written, which
+             * is what makes "#194=(3+4)" one.
+             */
+            int letter = (previous >= 0x61 && previous <= 0x7a)
+                      || (previous >= 0x41 && previous <= 0x5a);
+            if (!ended && letter) { out[at++] = 0; ended = 1; }
+            int bare = src[i + 1] == 0x3a;
+            size_t from = bare ? i + 2 : i;
+            size_t to = bare && end > i + 2 ? end - 1 : end;
+            if (ended) {
+                if (count < start_limit) starts[count] = at;
+                count++;
+                ended = 0;
+            }
+            for (size_t k = from; k < to && at + 2 < out_size; k++) previous = out[at++] = src[k];
+            i = end;
+            continue;
+        }
+        if (src[i] == 0x20) {      /* a run of these ends one token */
+            if (!ended) { out[at++] = 0; ended = 1; }
+            i++;
+            continue;
+        }
+        if (ended) {
+            if (count < start_limit) starts[count] = at;
+            count++;
+            ended = 0;
+        }
+        previous = out[at++] = src[i++];
+    }
+    if (!ended) out[at++] = 0;
+    return count;
+}
+
+/* Every occurrence of one string swapped for another (0x00558C40). */
+static void replace_all(const char *src, const char *find, const char *with,
+                        char *out, size_t out_size) {
+    size_t at = 0, find_length = strlen(find), with_length = strlen(with);
+    if (find_length == 0) {
+        snprintf(out, out_size, "%s", src);
+        return;
+    }
+    for (size_t i = 0; src[i] != 0 && at + 1 < out_size;) {
+        if (strncmp(src + i, find, find_length) == 0) {
+            for (size_t k = 0; k < with_length && at + 1 < out_size; k++) out[at++] = with[k];
+            i += find_length;
+        } else {
+            out[at++] = src[i++];
+        }
+    }
+    out[at] = 0;
+}
+
+/* Puts a string where the script asked for it. */
+static void write_text(cs2_kcs *script, uint32_t address, const char *text) {
+    size_t length = strlen(text) + 1;
+    char *out = cs2_kcs_at(script, address, (uint32_t) length);
+    if (out != NULL) memcpy(out, text, length);
+}
+
+static named_number *named_number_at(cs2_system *system, uint32_t table,
+                                     const char *name, int make) {
+    for (size_t i = 0; i < system->name_count; i++) {
+        named_number *entry = &system->names[i];
+        if (entry->table == table && strcmp(entry->name, name) == 0) return entry;
+    }
+    if (!make || system->name_count >= NAMED_NUMBERS) return NULL;
+    named_number *fresh = &system->names[system->name_count++];
+    fresh->table = table;
+    snprintf(fresh->name, sizeof fresh->name, "%s", name);
+    fresh->number = 0;
+    return fresh;
+}
 
 /* ------------------------------------------------------- reading arguments */
 
@@ -926,14 +1049,60 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     }
 
     /*
-     * 517: the system script tells the engine a scene-script command's name
-     * and its own number for it. Nothing here reads that back yet: what 326
-     * answers is the word's own type byte out of the file, not a number from
-     * this table, so keeping the table would be keeping something nothing
-     * asks. It goes back the day something does.
+     * 45: every occurrence of one string swapped for another, into a buffer
+     * the caller names. sscript runs a scene command through this before it
+     * reads it, turning the game own "$" hex mark into "0x" - and until it
+     * was written the buffer it writes into kept the LAST line put there, so
+     * every command of a scenario was read as the message before it.
      */
-    case 517:
+    case 45: {
+        const char *src = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        const char *find = cs2_kcs_text(script, arg(arguments, argument_size, 2));
+        const char *with = cs2_kcs_text(script, arg(arguments, argument_size, 3));
+        char written[TEXT_BYTES];
+        replace_all(src == NULL ? "" : src, find == NULL ? "" : find,
+                    with == NULL ? "" : with, written, sizeof written);
+        write_text(script, arg(arguments, argument_size, 0), written);
         return CS2_KCS_DONE;
+    }
+
+    /*
+     * 517, 518 and 519: how a scene script command is carried out. sscript
+     * registers all 259 command names against its own numbers with 517 - "bg"
+     * is 9, "se" 18, "title" 33 - splits a command line with 519 and looks the
+     * first token up with 518, then switches on the number. So this small
+     * table is the whole of the dispatch, and without it not one scene command
+     * ran: no background, no sound, no wait.
+     */
+    case 517: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        if (name != NULL) {
+            named_number *entry = named_number_at(system, arg(arguments, argument_size, 0),
+                                                  name, 1);
+            if (entry != NULL) entry->number = (int32_t) arg(arguments, argument_size, 2);
+        }
+        return CS2_KCS_DONE;
+    }
+    case 518: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        const named_number *entry = name == NULL ? NULL
+            : named_number_at(system, arg(arguments, argument_size, 0), name, 0);
+        *answer = (uint32_t) (entry == NULL ? -1 : entry->number);
+        return CS2_KCS_DONE_VALUE;
+    }
+    case 519: {
+        const char *src = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        uint32_t wanted = arg(arguments, argument_size, 2);
+        char written[TEXT_BYTES];
+        size_t starts[64];
+        size_t count = tokenise(src == NULL ? "" : src, written, sizeof written,
+                                starts, sizeof starts / sizeof *starts);
+        int found = wanted < count && wanted < sizeof starts / sizeof *starts;
+        write_text(script, arg(arguments, argument_size, 0),
+                   found ? written + starts[wanted] : "");
+        *answer = (uint32_t) found;
+        return CS2_KCS_DONE_VALUE;
+    }
 
     /*
      * 326 and 327: how the system script reads the scene script it put on the
