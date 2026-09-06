@@ -24,6 +24,8 @@
 #define KCS_HEADER      0x34u
 #define KCS_MAX_IMAGE   (64u * 1024u * 1024u)
 #define KCS_GCALL_COUNT 1024u
+#define KCS_TEXTS       4u
+#define KCS_TEXT_BYTES  512u
 
 /*
  * The persistent variables, which addresses with their top bit set reach. In
@@ -55,6 +57,9 @@ struct cs2_kcs {
     uint8_t *saved;         /* the persistent region, addressed with the top bit */
     uint32_t saved_size;
     int saved_is_ours;
+
+    char texts[KCS_TEXTS][KCS_TEXT_BYTES];  /* formatted strings, used in turn */
+    unsigned next_text;
 
     uint32_t switch_value;
 
@@ -212,6 +217,7 @@ uint32_t cs2_kcs_suspend_address(const cs2_kcs *script) { return script->suspend
 
 uint64_t cs2_kcs_instructions(const cs2_kcs *script) { return script->instructions; }
 uint32_t cs2_kcs_pc(const cs2_kcs *script) { return script->pc; }
+uint32_t cs2_kcs_base(const cs2_kcs *script) { return script->base; }
 const char *cs2_kcs_name(const cs2_kcs *script) { return script->name; }
 
 /* ------------------------------------------------------------- the memory */
@@ -222,7 +228,16 @@ static void fault(cs2_kcs *script, const char *format, ...) {
     va_start(arguments, format);
     vsnprintf(message, sizeof message, format, arguments);
     va_end(arguments);
-    if (!script->fault) cs2_set_error("%s at %#x: %s", script->name, script->pc, message);
+    if (!script->fault) {
+        /*
+         * Where the script was, and where its stack was: a fault in a machine
+         * like this is almost always a frame that did not balance, so the three
+         * marks are the first thing to look at.
+         */
+        cs2_set_error("%s at %#x: %s (stack %#x, frame %#x, arguments %#x, after %llu)",
+                      script->name, script->pc, message, script->sp, script->frame,
+                      script->base, (unsigned long long) script->instructions);
+    }
     script->fault = 1;
 }
 
@@ -247,6 +262,124 @@ void *cs2_kcs_at(cs2_kcs *script, uint32_t address, uint32_t size) {
         return NULL;
     }
     return script->memory + address;
+}
+
+/*
+ * The game's own way of writing a string with something in it, which is a
+ * printf conversion followed at once by the variable that fills it:
+ *
+ *     "%s[L24]%02d[L16]"      "config.int/%s[L280]"
+ *     "$str%d[L64]"           "plane %d[L12]"
+ *
+ * The letter is the bank the number is counted in - L the locals of the call
+ * being run, G the script's own globals, H the persistent variables every
+ * script shares - and the number is a byte offset in it, the same offset the
+ * frameaddr opcode would push.
+ *
+ * This is the machine's business rather than an engine function's because that
+ * is where the game keeps it: every name, path and message an engine function
+ * is given is fetched through one helper (0x6765E0) that expands the notation
+ * on the way out, which is why "plane %d[L12]" can be handed straight to the
+ * call that makes a plane. Only the plain copy (13) reads a string as it lies.
+ */
+static uint32_t format_address(cs2_kcs *script, char bank, uint32_t offset) {
+    switch (bank) {
+    case 'L': case 'l': return script->base + offset;
+    case 'H': case 'h': return 0x80000000u + offset;
+    default: return offset;
+    }
+}
+
+static void format_into(cs2_kcs *script, const char *format, char *out, size_t out_size) {
+    size_t used = 0;
+    out[0] = 0;
+    for (const char *at = format; *at != 0 && used + 1 < out_size; ) {
+        if (*at != '%') {
+            out[used++] = *at++;
+            out[used] = 0;
+            continue;
+        }
+        if (at[1] == '%') {
+            out[used++] = '%';
+            out[used] = 0;
+            at += 2;
+            continue;
+        }
+        char spec[32];
+        size_t length = 0;
+        spec[length++] = *at++;
+        while (*at != 0 && length + 2 < sizeof spec
+               && strchr("-+ #0123456789.", *at) != NULL) {
+            spec[length++] = *at++;
+        }
+        if (*at == 0) break;
+        char conversion = *at++;
+        spec[length++] = conversion;
+        spec[length] = 0;
+
+        char bank = 0;
+        uint32_t offset = 0;
+        int named = 0;
+        if (*at == '[') {
+            const char *scan = at + 1;
+            bank = *scan++;
+            uint32_t number = 0;
+            int digits = 0;
+            while (*scan >= '0' && *scan <= '9') {
+                number = number * 10u + (uint32_t) (*scan++ - '0');
+                digits++;
+            }
+            if (digits > 0 && *scan == ']') {
+                offset = number;
+                named = 1;
+                at = scan + 1;
+            }
+        }
+        if (!named) {
+            /* Not the game's notation after all: keep what was written. */
+            snprintf(out + used, out_size - used, "%s", spec);
+            used += strlen(out + used);
+            continue;
+        }
+
+        uint32_t address = format_address(script, bank, offset);
+        char piece[256];
+        piece[0] = 0;
+        if (conversion == 's') {
+            const char *value = cs2_kcs_string(script, address);
+            snprintf(piece, sizeof piece, spec, value == NULL ? "" : value);
+        } else {
+            uint32_t word = 0;
+            const void *from = cs2_kcs_at(script, address, 4);
+            if (from != NULL) memcpy(&word, from, 4);
+            if (conversion == 'f' || conversion == 'e' || conversion == 'g'
+                || conversion == 'E' || conversion == 'G') {
+                float value;
+                memcpy(&value, &word, sizeof value);
+                snprintf(piece, sizeof piece, spec, (double) value);
+            } else if (conversion == 'c') {
+                snprintf(piece, sizeof piece, spec, (int) (word & 0xffu));
+            } else {
+                snprintf(piece, sizeof piece, spec, (int) (int32_t) word);
+            }
+        }
+        snprintf(out + used, out_size - used, "%s", piece);
+        used += strlen(out + used);
+    }
+}
+
+/*
+ * The formatted form of a string, in one of a few buffers used in turn so that
+ * a handler holding two of them at once gets two answers.
+ */
+const char *cs2_kcs_text(cs2_kcs *script, uint32_t address) {
+    const char *raw = cs2_kcs_string(script, address);
+    if (raw == NULL) return NULL;
+    if (strchr(raw, '%') == NULL) return raw;
+    char *out = script->texts[script->next_text];
+    script->next_text = (script->next_text + 1u) % KCS_TEXTS;
+    format_into(script, raw, out, KCS_TEXT_BYTES);
+    return out;
 }
 
 const char *cs2_kcs_string(cs2_kcs *script, uint32_t address) {
@@ -280,8 +413,17 @@ static void push(cs2_kcs *script, uint32_t value) {
     script->sp += 4;
 }
 
+/*
+ * The original checks one thing only, that there are four bytes to take, and
+ * lets the stack run down into the globals: its own scripts do exactly that.
+ * After a call with no arguments to a function that takes its argument off the
+ * stack - sscript.kcs at 0x7E53 - the frame the call pushed is popped, written
+ * over and read back as rubbish, and the frame stays wrong until the caller's
+ * own return puts it right from marks that were never touched. Refusing that
+ * would stop the game where the game does not stop.
+ */
 static uint32_t pop(cs2_kcs *script) {
-    if (script->sp < 4u || script->sp - 4u < script->globals_size) {
+    if (script->sp < 4u) {
         fault(script, "the stack is empty");
         return 0;
     }
@@ -522,9 +664,26 @@ static int do_gcall(cs2_kcs *script, uint32_t at_opcode) {
     int written = result >= 0;
     if (!written) {
         answer = 0;
-        result = CS2_KCS_DONE_VALUE;
+        /*
+         * Where the game's own return code has been read off the handler it is
+         * used, so the stack is left exactly as the script expects even though
+         * the work is not done. Where it has not, answering is the safe half of
+         * the guess: a caller that wanted no answer drops it at the end of the
+         * statement anyway, while a caller that wanted one and got nothing
+         * would take someone else's value off the stack.
+         */
+        result = result <= -2 ? -2 - result : CS2_KCS_DONE_VALUE;
     }
 
+    /*
+     * Every call, not just the first of each, when CS2_KCS_TRACE is set. What a
+     * fault in a script this size needs is the order the calls came in, and
+     * which one was last before it: this is how the front end's path through
+     * the game is followed.
+     */
+    if (getenv("CS2_KCS_TRACE") != NULL) {
+        cs2_log("%s %#x: engine function %u answered %d", script->name, at_opcode, id, result);
+    }
     /* Each function is named once: this is how the boot path names itself. */
     if (id < KCS_GCALL_COUNT && !script->seen[id]) {
         script->seen[id] = 1;
@@ -688,6 +847,15 @@ static int step(cs2_kcs *script) {
         script->base = pop(script);
         script->pc = pop(script);
         if (script->fault) return -1;
+        /*
+         * The marks a return reads back are whatever the call left, and a
+         * script is allowed to have made a mess of the frame in between. Only
+         * the program counter has to be a place in the code.
+         */
+        if (script->pc >= script->code_size) {
+            fault(script, "a return went to %#x, which is not in the code", script->pc);
+            return -1;
+        }
         script->sp -= argument_size;
         if (answer_size != 0) {
             if (answer_at + answer_size > script->memory_size
@@ -737,16 +905,20 @@ static int step(cs2_kcs *script) {
 
     case 0x31:  /* enter: room for the locals */
         left = operand(script, &left_flags);
-        script->frame += left;
-        script->sp = script->frame;
-        if (script->frame > script->memory_size) {
-            fault(script, "the stack is full");
+        if (left > script->memory_size - script->frame) {
+            fault(script, "a frame asked for %u bytes of stack", left);
             return -1;
         }
+        script->frame += left;
+        script->sp = script->frame;
         return 1;
 
-    case 0x32:  /* leave */
+    case 0x32:  /* leave: give the locals back */
         left = operand(script, &left_flags);
+        if (left > script->frame) {
+            fault(script, "a frame gave back %u bytes it never took", left);
+            return -1;
+        }
         script->frame -= left;
         return 1;
 

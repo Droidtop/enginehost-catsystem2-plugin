@@ -2,39 +2,311 @@
  * The engine functions the game's own system script calls.
  *
  * Each one is written from its handler in the game's engine, and the numbering
- * is that engine's table at 0x0076D948. Anything not written here answers zero
- * and says so once in the log, which is how the boot path of a game names the
+ * is that engine's table at 0x0076D948. What each does, and how it was read, is
+ * in /root/re/kcs/KCS-FORMAT.md. Anything not written here answers zero and
+ * says so once in the log, which is how the boot path of a game names the
  * functions it needs.
+ *
+ * The return codes are the game's own and are not a matter of taste: they were
+ * read off each handler, because a function that answers a value where the
+ * original answered none leaves a word on the script's stack that the next
+ * statement will take for its own.
  */
 #include "system.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cs2.h"
+#include "layout.h"
+#include "scene.h"
+#include "startup.h"
+
+#define DOCUMENT_LIMIT 8
+#define VARIABLE_BYTES 0x10000u
+#define SYSTEM_VARIABLES 256
+#define SYSTEM_STRINGS 128
+#define SCENE_COMMANDS 96
+#define WORD_BYTES 256
+#define STRING_BYTES 260
+
+/*
+ * A system variable, as 210 and 211 pass them about: the scripts hand the
+ * engine a number and a value and read the value back later. The number looks
+ * like an address into the persistent block, but the scripts take it out of a
+ * table the engine fills in, so what it means is the engine's business and not
+ * the script's - which is exactly why it is kept here rather than written into
+ * the script's memory, where a number that is not an address would land on
+ * whatever happens to be at that offset.
+ */
+typedef struct {
+    uint32_t key;
+    uint32_t value;
+} system_variable;
+
+/*
+ * The game's other bank of variables: strings by number. adv.xml gives the
+ * numbers names - the file a new game starts on is string 200, the window
+ * theme 800 - and a script reaches one by writing "$str200" into a buffer and
+ * asking function 278 to resolve it.
+ */
+typedef struct {
+    uint32_t key;
+    char value[STRING_BYTES];
+} system_string;
+
+/*
+ * A scene-script command the system script has claimed for itself. The scenario
+ * interpreter plays a scene script; the words the system script registered
+ * (517) it hands back by number (326) so the script can carry them out - the
+ * title screen, save and load, the selection screens are all commands in a
+ * scene script that the system script answers.
+ */
+typedef struct {
+    char name[32];
+    uint32_t id;
+} scene_command;
 
 struct cs2_system {
     cs2_files *files;
-    uint32_t event;      /* what the reader has done, nothing yet if zero */
+    cs2_planes *planes;
+    int width, height;
+    uint32_t event;              /* what the reader has done, nothing yet if zero */
+    uint64_t frame;              /* the game's own sixty a second */
+    uint8_t *variables;          /* the persistent block every script shares */
+    cs2_startup *documents[DOCUMENT_LIMIT];
+    int scenario;                /* 789 answers this; 209 makes its interpreter */
+    int interpreter;
+    cs2_startup *settings;       /* the game's startup.xml, for the message format */
+    cs2_text *format;
+    cs2_scene *scene;            /* what 325 has loaded, and 330 steps */
+    int scene_loaded;
+    int scene_step;              /* the scene has something to run this frame */
+    int boot_type;
+    char boot_scenario[128];
+    scene_command commands[SCENE_COMMANDS];
+    size_t command_count;
+    cs2_layout *layout;          /* the .fes a started plane is running */
+    cs2_plane layout_plane;
+    cs2_kcs *flow;               /* the system script the layout has run */
+    int boot_override;           /* the runner was told which boot to force */
+    system_variable system_variables[SYSTEM_VARIABLES];
+    size_t system_variable_count;
+    system_string system_strings[SYSTEM_STRINGS];
+    size_t system_string_count;
+    int finished;
 };
 
-cs2_system *cs2_system_new(cs2_files *files) {
+static uint32_t *system_variable_at(cs2_system *system, uint32_t key, int make) {
+    for (size_t i = 0; i < system->system_variable_count; i++) {
+        if (system->system_variables[i].key == key) return &system->system_variables[i].value;
+    }
+    if (!make || system->system_variable_count >= SYSTEM_VARIABLES) return NULL;
+    system_variable *fresh = &system->system_variables[system->system_variable_count++];
+    fresh->key = key;
+    fresh->value = 0;
+    return &fresh->value;
+}
+
+static system_string *system_string_at(cs2_system *system, uint32_t key, int make) {
+    for (size_t i = 0; i < system->system_string_count; i++) {
+        if (system->system_strings[i].key == key) return &system->system_strings[i];
+    }
+    if (!make || system->system_string_count >= SYSTEM_STRINGS) return NULL;
+    system_string *fresh = &system->system_strings[system->system_string_count++];
+    fresh->key = key;
+    fresh->value[0] = 0;
+    return fresh;
+}
+
+void cs2_system_set_string(cs2_system *system, uint32_t number, const char *text) {
+    system_string *slot = system_string_at(system, number, 1);
+    if (slot != NULL) snprintf(slot->value, sizeof slot->value, "%s", text == NULL ? "" : text);
+}
+
+const char *cs2_system_string(cs2_system *system, uint32_t number) {
+    const system_string *slot = system_string_at(system, number, 0);
+    return slot == NULL ? NULL : slot->value;
+}
+
+void cs2_system_set_variable(cs2_system *system, uint32_t key, uint32_t value) {
+    uint32_t *slot = system_variable_at(system, key, 1);
+    if (slot != NULL) *slot = value;
+}
+
+/*
+ * The words of one line of the scenario, as the system script counts them: the
+ * command first and its arguments after, separated by spaces.
+ */
+static int scene_word(cs2_system *system, uint32_t line, uint32_t index,
+                      char *out, size_t out_size) {
+    out[0] = 0;
+    if (!system->scene_loaded) return -1;
+    const char *text = cs2_scene_line(system->scene, line, NULL);
+    if (text == NULL) return -1;
+    for (uint32_t at = 0; ; at++) {
+        while (*text == ' ' || *text == '\t') text++;
+        if (*text == 0) return -1;
+        const char *end = text;
+        while (*end != 0 && *end != ' ' && *end != '\t') end++;
+        if (at == index) {
+            size_t length = (size_t) (end - text);
+            if (length + 1 > out_size) length = out_size - 1;
+            memcpy(out, text, length);
+            out[length] = 0;
+            return 0;
+        }
+        text = end;
+    }
+}
+
+cs2_system *cs2_system_new(cs2_files *files, int width, int height) {
     cs2_system *system = calloc(1, sizeof *system);
     if (system == NULL) {
         cs2_set_error("out of memory for the engine's system functions");
         return NULL;
     }
     system->files = files;
+    system->width = width;
+    system->height = height;
+    system->planes = cs2_planes_new(width, height);
+    system->variables = calloc(1, VARIABLE_BYTES);
+    if (system->planes == NULL || system->variables == NULL) {
+        cs2_system_free(system);
+        cs2_set_error("out of memory for the engine's system functions");
+        return NULL;
+    }
+    system->scenario = 1;
+    system->boot_type = -20;
+
+    /*
+     * The scene player the front end drives. It needs the game's own message
+     * substitutions, which live in startup.xml beside the archives.
+     */
+    cs2_bytes document = {0};
+    if (cs2_files_read(files, "config.int/startup.xml", &document) == 0
+        || cs2_files_read(files, "startup.xml", &document) == 0) {
+        system->settings = cs2_startup_parse(document.data, document.size);
+        cs2_bytes_free(&document);
+    }
+    system->format = cs2_text_from(system->settings);
+    system->scene = system->format == NULL ? NULL : cs2_scene_new(files, system->format);
+    if (system->scene == NULL) {
+        cs2_system_free(system);
+        cs2_set_error("out of memory for the scenario the front end plays");
+        return NULL;
+    }
     return system;
 }
 
 void cs2_system_free(cs2_system *system) {
+    if (system == NULL) return;
+    for (int i = 0; i < DOCUMENT_LIMIT; i++) cs2_startup_free(system->documents[i]);
+    if (system->flow != NULL) {
+        /* The block is the engine's; take it back before the script frees it. */
+        cs2_kcs_set_variables(system->flow, NULL, 0);
+        cs2_kcs_free(system->flow);
+    }
+    cs2_planes_free(system->planes);
+    cs2_scene_free(system->scene);
+    cs2_text_free(system->format);
+    cs2_startup_free(system->settings);
+    free(system->variables);
     free(system);
 }
 
 void cs2_system_event(cs2_system *system, uint32_t event) {
     system->event = event;
+    /*
+     * The reader has asked for the next thing. The system script is told too -
+     * it is what decides whether the click belongs to a menu - but a scenario
+     * on the screen advances on it, which is what reading the game is.
+     */
+    if (system->scene_loaded) system->scene_step = 1;
 }
+
+const cs2_scene *cs2_system_scenario(const cs2_system *system) {
+    if (system == NULL || !system->scene_loaded) return NULL;
+    return system->scene;
+}
+
+/* The sound device, for the scenario the front end plays. */
+void cs2_system_set_audio(cs2_system *system, cs2_audio *audio) {
+    if (system != NULL) cs2_scene_set_audio(system->scene, audio);
+}
+
+void cs2_system_set_boot(cs2_system *system, int type, const char *scenario) {
+    if (system == NULL) return;
+    system->boot_override = 1;
+    system->boot_type = type;
+    snprintf(system->boot_scenario, sizeof system->boot_scenario, "%s",
+             scenario == NULL ? "" : scenario);
+}
+
+const cs2_planes *cs2_system_planes(const cs2_system *system) {
+    return system == NULL ? NULL : system->planes;
+}
+
+void *cs2_system_variables(cs2_system *system, uint32_t *size) {
+    if (size != NULL) *size = VARIABLE_BYTES;
+    return system == NULL ? NULL : system->variables;
+}
+
+int cs2_system_finished(const cs2_system *system) {
+    return system == NULL ? 0 : system->finished;
+}
+
+const cs2_kcs *cs2_system_script(const cs2_system *system) {
+    return system == NULL ? NULL : system->flow;
+}
+
+/*
+ * The return codes of the engine functions the game asks for and this engine
+ * has not written yet, read off each handler in Grisaia2.bin with
+ * /root/re/kcs/gcallret.py. They are here rather than guessed because the code
+ * is what keeps the script's stack straight: with them a run walks the whole
+ * front end and names everything it wanted, and without them it stops at the
+ * first function whose answer nobody takes.
+ */
+static const struct {
+    uint16_t id;
+    uint8_t code;
+} unwritten_return_codes[] = {
+    {35, 2},   {78, 2},   {84, 2},   {85, 2},   {101, 2},  {143, 0},  {156, 2},
+    {207, 2},  {238, 1},  {244, 1},  {294, 1},  {301, 2},  {311, 1},  {315, 1},
+    {316, 1},  {323, 1},  {328, 1},  {329, 1},  {342, 2},  {344, 2},  {345, 2},
+    {389, 1},  {402, 2},  {404, 2},  {419, 1},  {434, 2},  {455, 2},  {458, 2},
+    {466, 2},  {515, 1},  {542, 2},  {572, 2},  {586, 2},  {593, 2},  {594, 1},
+    {630, 2},  {633, 1},  {645, 2},  {646, 1},  {696, 1},  {739, 2},  {741, 1},
+    {785, 2},  {790, 1},  {863, 1},  {866, 1},  {925, 1}
+};
+
+/* ------------------------------------------------------- reading arguments */
+
+static uint32_t arg(const uint8_t *arguments, uint32_t size, uint32_t index) {
+    return cs2_kcs_argument(arguments, size, index);
+}
+
+static float argf(const uint8_t *arguments, uint32_t size, uint32_t index) {
+    uint32_t word = cs2_kcs_argument(arguments, size, index);
+    float value;
+    memcpy(&value, &word, sizeof value);
+    return value;
+}
+
+static uint32_t from_float(float value) {
+    uint32_t word;
+    memcpy(&word, &value, sizeof word);
+    return word;
+}
+
+static cs2_plane_state *plane_of(cs2_system *system, const uint8_t *arguments,
+                                 uint32_t size, uint32_t index) {
+    return cs2_plane_get(system->planes, arg(arguments, size, index));
+}
+
+/* --------------------------------------------------------------- the frame */
 
 /*
  * 71: wait for the reader, and put what they did at the address given.
@@ -47,7 +319,7 @@ void cs2_system_event(cs2_system *system, uint32_t event) {
  */
 static int wait_for_the_reader(cs2_system *system, cs2_kcs *script,
                                const uint8_t *arguments, uint32_t argument_size) {
-    uint32_t where = cs2_kcs_argument(arguments, argument_size, 0);
+    uint32_t where = arg(arguments, argument_size, 0);
     cs2_kcs_suspend(script, where);
     if (system->event != 0) {
         uint32_t *at = cs2_kcs_at(script, where, 4);
@@ -61,14 +333,637 @@ static int wait_for_the_reader(cs2_system *system, cs2_kcs *script,
     return CS2_KCS_DONE_YIELD_AGAIN;
 }
 
+/*
+ * Starting a plane (448) starts its layout, and the layout is the game.
+ *
+ * The boot script gives its "main" plane the layout "flow" and starts it, and
+ * flow.fes is the whole shape of Labyrinth of Grisaia: it shows the logo, then
+ * the title screen, and when the title answers "new game" it writes -1 into
+ * flag 512 - the flag adv.xml calls sysflag/boot - and runs kcs.int/sscript.kcs.
+ * So the boot type is not set by the engine at all: the game's own layout sets
+ * it, which is why nothing in either script and no string in Grisaia2.bin ever
+ * named it.
+ */
+static int32_t host_flag(void *context, int number) {
+    cs2_system *system = context;
+    uint32_t *at = system_variable_at(system, (uint32_t) number, 0);
+    return at == NULL ? 0 : (int32_t) *at;
+}
+
+static void host_set_flag(void *context, int number, int32_t value) {
+    cs2_system_set_variable(context, (uint32_t) number, (uint32_t) value);
+}
+
+static void host_set_string(void *context, int number, const char *text) {
+    cs2_system_set_string(context, (uint32_t) number, text);
+}
+
+/* execkcs: the layout starts one of the game's system scripts beside itself. */
+static void host_run_script(void *context, const char *name) {
+    cs2_system *system = context;
+    if (system->flow != NULL) return;
+    char path[160];
+    snprintf(path, sizeof path, "kcs.int/%s.kcs", name);
+    system->flow = cs2_kcs_load(system->files, path);
+    if (system->flow == NULL) {
+        cs2_log("the layout asked for %s but %s", path, cs2_error());
+        return;
+    }
+    cs2_kcs_set_variables(system->flow, system->variables, VARIABLE_BYTES);
+    cs2_kcs_set_gcall(system->flow, cs2_system_gcall, system);
+    cs2_kcs_trace(system->flow, 1);
+
+    /*
+     * What it boots into. The numbers adv.xml keeps them under are in the
+     * persistent block by now, put there by the boot script; the layout has
+     * already written the boot type into the flag, so the engine only writes
+     * one when the runner was told to force it.
+     */
+    uint32_t boot_flag = 0, boot_string = 0;
+    memcpy(&boot_flag, system->variables + 0x4884u, 4);
+    memcpy(&boot_string, system->variables + 0x48D8u, 4);
+    if (system->boot_override) {
+        cs2_system_set_variable(system, boot_flag, (uint32_t) (int32_t) system->boot_type);
+        if (system->boot_scenario[0] != 0) {
+            cs2_system_set_string(system, boot_string, system->boot_scenario);
+        }
+    }
+    cs2_log("%s starts, boot type %d", path, host_flag(system, (int) boot_flag));
+}
+
+static void host_stop_script(void *context) {
+    cs2_system *system = context;
+    if (system->flow == NULL) return;
+    cs2_kcs_set_variables(system->flow, NULL, 0);
+    cs2_kcs_free(system->flow);
+    system->flow = NULL;
+}
+
+static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
+    plane->running = 1;
+    plane->result = -1;
+    if (plane->layout[0] == 0) {
+        cs2_log("the plane %s was started with no layout", plane->name);
+        return;
+    }
+    if (system->layout != NULL) return;
+    cs2_layout_host host = {
+        system, host_flag, host_set_flag, host_set_string,
+        host_run_script, host_stop_script
+    };
+    system->layout = cs2_layout_start(system->files, plane->layout, &host);
+    system->layout_plane = plane->handle;
+    if (system->layout == NULL) cs2_log("%s", cs2_error());
+}
+
+const cs2_layout *cs2_system_layout(const cs2_system *system) {
+    return system == NULL ? NULL : system->layout;
+}
+
+void cs2_system_draw(cs2_system *system, uint32_t *canvas, int width, int height) {
+    if (system == NULL) return;
+    cs2_planes_draw(system->planes, canvas, width, height);
+    cs2_layout_draw(system->layout, canvas, width, height);
+}
+
+void cs2_system_frame(cs2_system *system) {
+    if (system == NULL) return;
+    system->frame++;
+    /*
+     * The layout first: it is the front end, and the system script it runs is
+     * something it starts part way through. A layout that has finished leaves
+     * its answer on the plane, which is what 452 reads back.
+     */
+    if (system->layout != NULL) {
+        cs2_layout_frame(system->layout);
+        cs2_plane_state *plane = cs2_plane_get(system->planes, system->layout_plane);
+        int result = cs2_layout_result(system->layout);
+        if (plane != NULL && result >= 0) {
+            plane->running = 0;
+            plane->result = result;
+        }
+    }
+    if (system->flow == NULL) return;
+    int running = cs2_kcs_frame(system->flow, 2000000);
+    if (running < 0) {
+        cs2_log("kcs.int/sscript.kcs: %s", cs2_error());
+    }
+    if (running <= 0) host_stop_script(system);
+}
+
+/* ----------------------------------------------------------- the functions */
+
 int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
                      const uint8_t *arguments, uint32_t argument_size, uint32_t *answer) {
     cs2_system *system = context;
-    (void) answer;
     switch (id) {
+
+    /*
+     * 1: say something. The script's own diagnostics, written in the game's own
+     * format notation - "sscript loaded > %s[L20]" - so they go through the
+     * same formatting as 14.
+     */
+    case 1: {
+        const char *message = cs2_kcs_text(script, arg(arguments, argument_size, 0));
+        if (message != NULL) {
+            cs2_log("%s: %s", cs2_kcs_name(script), message);
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /*
+     * 14: write a string with something in it, into the script's own memory.
+     * Until this was written the game's plane names read "plane %d[L12]".
+     */
+    case 14: {
+        uint32_t destination = arg(arguments, argument_size, 0);
+        const char *written = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        if (written == NULL) written = "";
+        size_t length = strlen(written) + 1;
+        char *at = cs2_kcs_at(script, destination, (uint32_t) length);
+        if (at != NULL) memcpy(at, written, length);
+        *answer = destination;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /* 277: write one of the game's numbered strings into the script's memory. */
+    case 277: {
+        uint32_t number = arg(arguments, argument_size, 0);
+        uint32_t destination = arg(arguments, argument_size, 1);
+        const char *value = cs2_system_string(system, number);
+        if (value == NULL) value = "";
+        size_t length = strlen(value) + 1;
+        char *at = cs2_kcs_at(script, destination, (uint32_t) length);
+        if (at != NULL) memcpy(at, value, length);
+        *answer = destination;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 278: resolve a reference to one of those strings, in place. The script
+     * writes "$str200" into a buffer with 14 and hands the buffer here; what
+     * comes back is the string that number holds - for 200, the file a new
+     * game starts on.
+     */
+    case 278: {
+        uint32_t address = arg(arguments, argument_size, 0);
+        const char *reference = cs2_kcs_text(script, address);
+        if (reference == NULL || strncmp(reference, "$str", 4) != 0) return CS2_KCS_DONE;
+        char *end = NULL;
+        unsigned long number = strtoul(reference + 4, &end, 10);
+        if (end == reference + 4) return CS2_KCS_DONE;
+        const char *value = cs2_system_string(system, (uint32_t) number);
+        if (value == NULL) {
+            cs2_log("%s: the game has no string %lu to put in %s", cs2_kcs_name(script),
+                    number, reference);
+            value = "";
+        }
+        size_t length = strlen(value) + 1;
+        char *at = cs2_kcs_at(script, address, (uint32_t) length);
+        if (at != NULL) memcpy(at, value, length);
+        return CS2_KCS_DONE;
+    }
+
+    /* 5: the clock, in milliseconds, which is what the fades are counted in. */
+    case 5:
+        *answer = (uint32_t) (system->frame * 1000u / 60u);
+        return CS2_KCS_DONE_VALUE;
+
+    /* 8: the size of the screen, written through the two addresses given. */
+    case 8: {
+        uint32_t *width = cs2_kcs_at(script, arg(arguments, argument_size, 0), 4);
+        uint32_t *height = cs2_kcs_at(script, arg(arguments, argument_size, 1), 4);
+        uint32_t w = (uint32_t) system->width, h = (uint32_t) system->height;
+        if (width != NULL) memcpy(width, &w, 4);
+        if (height != NULL) memcpy(height, &h, 4);
+        return CS2_KCS_DONE;
+    }
+
+    /* 9: the game has asked to stop. */
+    case 9:
+        system->finished = 1;
+        cs2_log("%s: the game has asked to stop", cs2_kcs_name(script));
+        return CS2_KCS_DONE;
+
+    /* 13: copy a string from one place in the script's memory to another. */
+    case 13: {
+        uint32_t destination = arg(arguments, argument_size, 0);
+        const char *source = cs2_kcs_string(script, arg(arguments, argument_size, 1));
+        if (source != NULL) {
+            size_t length = strlen(source) + 1;
+            char *at = cs2_kcs_at(script, destination, (uint32_t) length);
+            if (at != NULL) memcpy(at, source, length);
+        }
+        *answer = destination;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /* 36: fill a run of the script's memory with one byte. */
+    case 36: {
+        uint32_t address = arg(arguments, argument_size, 0);
+        uint32_t value = arg(arguments, argument_size, 1);
+        uint32_t count = arg(arguments, argument_size, 2);
+        uint8_t *at = cs2_kcs_at(script, address, count);
+        if (at != NULL) memset(at, (int) (value & 0xffu), count);
+        return CS2_KCS_DONE;
+    }
+
+    /* 66: make a plane of a kind, under another, with a name. */
+    case 66: {
+        int type = (int) arg(arguments, argument_size, 0);
+        cs2_plane parent = arg(arguments, argument_size, 1);
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 2));
+        *answer = cs2_plane_create(system->planes, type, parent, name);
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /* 67: and take it away again. */
+    case 67:
+        cs2_plane_destroy(system->planes, arg(arguments, argument_size, 0));
+        return CS2_KCS_DONE;
+
+    /* 68: the screen's own plane, which everything else hangs under. */
+    case 68:
+        *answer = cs2_planes_root(system->planes);
+        return CS2_KCS_DONE_VALUE;
+
     case 71:
         return wait_for_the_reader(system, script, arguments, argument_size);
+
+    /* 79: how big a plane is, as the floats the script works in. */
+    case 79: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) {
+            plane->width = argf(arguments, argument_size, 1);
+            plane->height = argf(arguments, argument_size, 2);
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /* 88: what it is drawn in front of. */
+    case 88: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) plane->priority = argf(arguments, argument_size, 1);
+        return CS2_KCS_DONE;
+    }
+
+    /* 92: show it or hide it. */
+    case 92: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) plane->visible = arg(arguments, argument_size, 1) != 0;
+        return CS2_KCS_DONE;
+    }
+
+    /* 100: paint it a colour, which is how the game fades to and from black. */
+    case 100: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) {
+            plane->colour = arg(arguments, argument_size, 1);
+            plane->filled = arg(arguments, argument_size, 2) != 0;
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /* 104: place, size and priority in one call, for a plane being set up. */
+    case 104: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) {
+            plane->x = (float) (int32_t) arg(arguments, argument_size, 1);
+            plane->y = (float) (int32_t) arg(arguments, argument_size, 2);
+            plane->width = (float) (int32_t) arg(arguments, argument_size, 3);
+            plane->height = (float) (int32_t) arg(arguments, argument_size, 4);
+            plane->priority = (float) (int32_t) arg(arguments, argument_size, 5);
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /* 105, 262: take a plane into use, or put it away. */
+    case 105:
+    case 262: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) plane->visible = arg(arguments, argument_size, 1) != 0;
+        return CS2_KCS_DONE;
+    }
+
+    /* 256, 260: size and place as whole numbers. */
+    case 256: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) {
+            plane->width = (float) (int32_t) arg(arguments, argument_size, 1);
+            plane->height = (float) (int32_t) arg(arguments, argument_size, 2);
+        }
+        return CS2_KCS_DONE;
+    }
+    case 260: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) {
+            plane->x = (float) (int32_t) arg(arguments, argument_size, 1);
+            plane->y = (float) (int32_t) arg(arguments, argument_size, 2);
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /*
+     * 117: fill a rectangle straight onto a surface, 0 being the screen. The
+     * boot path calls it five times over a table it has just zeroed, so nothing
+     * is drawn until something fills that table in; the call is written all the
+     * same because a debug build fills it.
+     */
+    case 117: {
+        uint32_t surface = arg(arguments, argument_size, 0);
+        int width = (int) (int32_t) arg(arguments, argument_size, 3);
+        int height = (int) (int32_t) arg(arguments, argument_size, 4);
+        if (surface != 0 && width > 0 && height > 0) {
+            cs2_log("%s: a rectangle fill on surface %u, which is not the screen",
+                    cs2_kcs_name(script), surface);
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /* 209: the interpreter that runs a scenario, and 789 the scenario itself. */
+    case 209:
+        system->interpreter = 1;
+        return CS2_KCS_DONE;
+    case 789:
+        *answer = (uint32_t) system->scenario;
+        return CS2_KCS_DONE_VALUE;
+
+    /*
+     * 210, 211: read and write one of the system variables the interpreter
+     * keeps. The boot script sets them up and the system script reads them
+     * back - the boot type it starts on (a new game, a recollection, a saved
+     * game) is one of these.
+     */
+    case 210: {
+        uint32_t *value = system_variable_at(system, arg(arguments, argument_size, 0), 0);
+        *answer = value == NULL ? 0 : *value;
+        return CS2_KCS_DONE_VALUE;
+    }
+    case 211: {
+        uint32_t *value = system_variable_at(system, arg(arguments, argument_size, 0), 1);
+        if (value != NULL) *value = arg(arguments, argument_size, 1);
+        return CS2_KCS_DONE;
+    }
+
+    /* 247: one of the game's own data files, or nothing when it is not there. */
+    case 247: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 0));
+        cs2_bytes content = {0};
+        if (name != NULL && cs2_files_read(system->files, name, &content) == 0) {
+            cs2_bytes_free(&content);
+            cs2_log("%s: %s exists but reading it is not written yet", cs2_kcs_name(script), name);
+        }
+        *answer = 0;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /* 276: hand a block of the script's memory to the engine, by number. */
+    case 276:
+        return CS2_KCS_DONE;
+
+    /*
+     * 318, 319: where a run has got to. The arguments are the value it starts
+     * at, the value it ends at, which shape the run has, how long it lasts and
+     * how far in it is; 319 rounds that to a whole number.
+     */
+    case 318: {
+        float from = argf(arguments, argument_size, 0);
+        float to = argf(arguments, argument_size, 1);
+        float span = argf(arguments, argument_size, 3);
+        float at = argf(arguments, argument_size, 4);
+        float part = span > 0 ? at / span : 1.0f;
+        if (part < 0) part = 0;
+        if (part > 1) part = 1;
+        *answer = from_float(from + (to - from) * part);
+        return CS2_KCS_DONE_VALUE;
+    }
+    case 319: {
+        float value = argf(arguments, argument_size, 0);
+        *answer = (uint32_t) (int32_t) (value < 0 ? value - 0.5f : value + 0.5f);
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 325: put a scene script on the screen. This is the bridge between the
+     * game's front end and its scene player: every way into the game - a new
+     * game, a recollection, a saved game, the title screen itself - ends in
+     * this call, and everything the scene player draws is on the far side of
+     * it. The name is the scenario's, without a folder or an extension.
+     */
+    case 325: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        char path[256];
+        *answer = 0;
+        if (name == NULL || name[0] == 0) return CS2_KCS_DONE_VALUE;
+        if (strchr(name, '/') != NULL) {
+            snprintf(path, sizeof path, "%s", name);
+        } else {
+            size_t length = strlen(name);
+            int has_suffix = length > 4 && cs2_ieq(name + length - 4, ".cst");
+            snprintf(path, sizeof path, "scene.int/%s%s", name, has_suffix ? "" : ".cst");
+        }
+        if (cs2_scene_play(system->scene, path) != 0) {
+            cs2_log("%s: %s", cs2_kcs_name(script), cs2_error());
+            return CS2_KCS_DONE_VALUE;
+        }
+        system->scene_loaded = 1;
+        system->scene_step = 1;
+        *answer = 1;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 517: the system script claims a scene-script command for itself, by name
+     * and by number. Forty-odd of them - title, select, movie, cgreg, place -
+     * are the screens the game's front end is made of.
+     */
+    case 517: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        uint32_t id = arg(arguments, argument_size, 2);
+        if (name != NULL && system->command_count < SCENE_COMMANDS) {
+            scene_command *fresh = &system->commands[system->command_count++];
+            snprintf(fresh->name, sizeof fresh->name, "%s", name);
+            fresh->id = id;
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /*
+     * 326: which of those commands the word at this place in the scenario is,
+     * and -1 when it is not one of them. 327 is the same word as text. Between
+     * them the system script reads the scene script it put on the screen.
+     */
+    case 326: {
+        char word[WORD_BYTES];
+        *answer = 0xffffffffu;
+        if (scene_word(system, arg(arguments, argument_size, 1),
+                       arg(arguments, argument_size, 2), word, sizeof word) != 0) {
+            return CS2_KCS_DONE_VALUE;
+        }
+        for (size_t i = 0; i < system->command_count; i++) {
+            if (cs2_ieq(system->commands[i].name, word)) {
+                *answer = system->commands[i].id;
+                break;
+            }
+        }
+        return CS2_KCS_DONE_VALUE;
+    }
+    case 327: {
+        char word[WORD_BYTES];
+        uint32_t destination = arg(arguments, argument_size, 1);
+        scene_word(system, arg(arguments, argument_size, 2),
+                   arg(arguments, argument_size, 3), word, sizeof word);
+        size_t length = strlen(word) + 1;
+        char *at = cs2_kcs_at(script, destination, (uint32_t) length);
+        if (at != NULL) memcpy(at, word, length);
+        *answer = destination;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 330 and 331: the scenario's turn, once a frame. In the game these are two
+     * halves of the same thing - run what the script has to run, then draw what
+     * it left - and the scene player is written the same way round: it runs
+     * commands until the script wants the reader, and what it leaves behind is
+     * the frame. So the running is here and the drawing is whoever composes the
+     * screen.
+     */
+    case 330:
+        if (system->scene_loaded && system->scene_step) {
+            system->scene_step = 0;
+            cs2_scene_advance(system->scene);
+            const char *skipped = cs2_scene_take_skipped(system->scene);
+            if (skipped[0] != 0) {
+                cs2_log("%s: commands not carried out yet: %s", cs2_kcs_name(script), skipped);
+            }
+        }
+        return CS2_KCS_DONE;
+    case 331:
+        return CS2_KCS_DONE;
+
+    /* 332: how many lines a scene script holds, which is how far it can be
+     * wound on. */
+    case 332:
+        *answer = (uint32_t) cs2_scene_line_count(system->scene);
+        return CS2_KCS_DONE_VALUE;
+
+    /*
+     * 359: the game's engine copies four blocks of its own state into the
+     * script's persistent variables. Here those variables ARE the state - there
+     * is no second copy to fetch from - so the blocks are already where the
+     * script is about to read them.
+     */
+    case 359:
+        return CS2_KCS_DONE;
+
+    /* 393: a setting on the window itself, which a drawn frame does not have. */
+    case 393:
+        return CS2_KCS_DONE;
+
+    /* 400: where a piece of music loops, out of the game's own list. */
+    case 400: {
+        const char *path = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        cs2_bytes content = {0};
+        if (path == NULL || cs2_files_read(system->files, path, &content) != 0) {
+            cs2_log("%s: the music loop points (%s) are not in this game",
+                    cs2_kcs_name(script), path == NULL ? "?" : path);
+            return CS2_KCS_DONE;
+        }
+        cs2_bytes_free(&content);
+        return CS2_KCS_DONE;
+    }
+
+    /* 447: the layout a plane draws itself from, a .fes in the game's own set. */
+    case 447: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        if (plane != NULL && name != NULL) {
+            snprintf(plane->layout, sizeof plane->layout, "%s", name);
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /* 448: start it. This is where the game hands over to its own front end. */
+    case 448: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) start_the_layout(system, plane);
+        return CS2_KCS_DONE;
+    }
+
+    /* 449: the plane it works with - its image list. */
+    case 449: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        if (plane != NULL) plane->attached = arg(arguments, argument_size, 1);
+        return CS2_KCS_DONE;
+    }
+
+    /* 452: what a started plane finished with; -1 for as long as it runs. */
+    case 452: {
+        cs2_plane_state *plane = plane_of(system, arguments, argument_size, 0);
+        *answer = (uint32_t) (int32_t) (plane == NULL ? -1 : plane->result);
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /* 465: whether this is one of the developer's own builds. It is not. */
+    case 465:
+        *answer = 0;
+        return CS2_KCS_DONE_VALUE;
+
+    /* 590, 591, 592: one of the game's configuration documents. */
+    case 590: {
+        const char *path = cs2_kcs_text(script, arg(arguments, argument_size, 0));
+        cs2_bytes document = {0};
+        *answer = 0;
+        if (path == NULL || cs2_files_read(system->files, path, &document) != 0) {
+            cs2_log("%s: no configuration document %s", cs2_kcs_name(script),
+                    path == NULL ? "?" : path);
+            return CS2_KCS_DONE_VALUE;
+        }
+        for (int i = 0; i < DOCUMENT_LIMIT; i++) {
+            if (system->documents[i] != NULL) continue;
+            system->documents[i] = cs2_startup_parse(document.data, document.size);
+            if (system->documents[i] != NULL) *answer = (uint32_t) (i + 1);
+            break;
+        }
+        cs2_bytes_free(&document);
+        if (*answer == 0) cs2_log("%s: no room to keep %s open", cs2_kcs_name(script), path);
+        return CS2_KCS_DONE_VALUE;
+    }
+    case 591: {
+        uint32_t handle = arg(arguments, argument_size, 0);
+        if (handle >= 1 && handle <= DOCUMENT_LIMIT) {
+            cs2_startup_free(system->documents[handle - 1]);
+            system->documents[handle - 1] = NULL;
+        }
+        return CS2_KCS_DONE;
+    }
+    case 592: {
+        uint32_t handle = arg(arguments, argument_size, 0);
+        int fallback = (int) (int32_t) arg(arguments, argument_size, 1);
+        const char *path = cs2_kcs_text(script, arg(arguments, argument_size, 2));
+        const cs2_startup *document = handle >= 1 && handle <= DOCUMENT_LIMIT
+            ? system->documents[handle - 1] : NULL;
+        *answer = (uint32_t) (int32_t) (path == NULL ? fallback
+                                        : cs2_startup_number(document, path, fallback));
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /* 848, 849: two settings on a plane the drawn screen does not read yet. */
+    case 848:
+    case 849:
+        return CS2_KCS_DONE;
+
+    /* 938: whether the game is being resumed rather than started. It is not. */
+    case 938:
+        *answer = 0;
+        return CS2_KCS_DONE_VALUE;
+
     default:
+        for (size_t i = 0; i < sizeof unwritten_return_codes / sizeof *unwritten_return_codes; i++) {
+            if (unwritten_return_codes[i].id == id) {
+                return CS2_KCS_UNWRITTEN_WITH(unwritten_return_codes[i].code);
+            }
+        }
         return CS2_KCS_UNWRITTEN;
     }
 }

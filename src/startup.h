@@ -26,7 +26,11 @@ size_t cs2_startup_count(const cs2_startup *startup);
 const char *cs2_startup_path_at(const cs2_startup *startup, size_t index);
 const char *cs2_startup_value_at(const cs2_startup *startup, size_t index);
 
-/* A value read as a number, or the fallback when it is missing or not one. */
+/*
+ * A value read as a number, or the fallback when it is missing or is not one.
+ * Any number the document holds is a number, zero and negatives included: a
+ * caller that needs a range (a screen size, say) checks it for itself.
+ */
 int cs2_startup_number(const cs2_startup *startup, const char *path, int fallback);
 
 #endif

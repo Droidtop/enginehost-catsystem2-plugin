@@ -14,6 +14,7 @@
 #include "audio.h"
 #include "files.h"
 #include "kcs.h"
+#include "plane.h"
 #include "png.h"
 #include "render.h"
 #include "scene.h"
@@ -30,6 +31,11 @@ static void usage(void) {
         "                    menus - instead of playing a scene, and say which of the\n"
         "                    engine's functions it asks for\n"
         "  --frames <n>      how many frames of it to run (default 60)\n"
+        "  --boot <n>        what the system script boots into: -1 a new game, -2 a\n"
+        "                    recollection, -10 scene select, -20 the ordinary boot\n"
+        "                    through start.txt, anything else a saved game (default -20)\n"
+        "  --boot-scene <s>  the scene script that boot begins on, for the ways in\n"
+        "                    that name one\n"
         "  --script <name>   play this script instead of the game's own entry point,\n"
         "                    as \"ama_001.cst\" or \"scene.int/ama_001.cst\"\n"
         "  --steps <n>       advance n times before showing anything (default 1)\n"
@@ -71,6 +77,16 @@ static int first_scene_script(cs2_files *files, char *out, size_t out_size) {
     return 0;
 }
 
+/*
+ * A screen size out of startup.xml. cs2_startup_number reads any number the
+ * document holds, including the zeroes and negatives a configuration file is
+ * entitled to; a screen is not one of those, so the fallback is here.
+ */
+static int screen_size(const cs2_startup *startup, const char *path, int fallback) {
+    int value = cs2_startup_number(startup, path, fallback);
+    return value > 0 && value <= 8192 ? value : fallback;
+}
+
 static int ends_with_cst(const char *name) {
     size_t length = strlen(name);
     return length > 4 && cs2_ieq(name + length - 4, ".cst");
@@ -88,6 +104,9 @@ int main(int argc, char **argv) {
     const char *images = NULL;
     const char *kcs_script = NULL;
     int kcs_frames = 0;
+    int boot_type = -20;
+    int boot_given = 0;
+    const char *boot_scene = NULL;
     int silent = 0;
     int steps = 1;
     for (int i = 2; i < argc; i++) {
@@ -96,6 +115,14 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') kcs_script = argv[++i];
         }
         else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) kcs_frames = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--boot") == 0 && i + 1 < argc) {
+            boot_type = atoi(argv[++i]);
+            boot_given = 1;
+        }
+        else if (strcmp(argv[i], "--boot-scene") == 0 && i + 1 < argc) {
+            boot_scene = argv[++i];
+            boot_given = 1;
+        }
         else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
         else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
@@ -164,6 +191,8 @@ int main(int argc, char **argv) {
      * the engine's thousand functions the boot path asks for, and in what order.
      */
     if (kcs_frames > 0) {
+        int width = screen_size(startup, "SCREEN/width", 1024);
+        int height = screen_size(startup, "SCREEN/height", 576);
         char path[512];
         const char *entry = cs2_startup_value(startup, "SCRIPT/start");
         if (kcs_script != NULL) entry = kcs_script;
@@ -178,27 +207,93 @@ int main(int argc, char **argv) {
             cs2_files_close(files);
             return 1;
         }
-        cs2_system *system = cs2_system_new(files);
+        cs2_system *system = cs2_system_new(files, width, height);
         if (system == NULL) {
             fprintf(stderr, "%s\n", cs2_error());
             return 1;
         }
+        /* The game's own layout sets the boot type; --boot overrides it. */
+        if (boot_given) cs2_system_set_boot(system, boot_type, boot_scene);
+        uint32_t variable_size = 0;
+        void *variables = cs2_system_variables(system, &variable_size);
+        cs2_kcs_set_variables(system_script, variables, variable_size);
         cs2_kcs_set_gcall(system_script, cs2_system_gcall, system);
         cs2_kcs_trace(system_script, 1);
         cs2_log("running %s", path);
+        /*
+         * The boot script and whatever it starts are two halves of one game and
+         * run a frame each, in that order, sharing one block of the game's own
+         * persistent variables.
+         */
         int running = 1, frame = 0;
-        for (; running == 1 && frame < kcs_frames; frame++) {
+        for (; running == 1 && frame < kcs_frames && !cs2_system_finished(system); frame++) {
             running = cs2_kcs_frame(system_script, 2000000);
+            cs2_system_frame(system);
         }
         if (running < 0) fprintf(stderr, "%s\n", cs2_error());
         cs2_log("%s: %d frames, %llu instructions, stopped at %#x%s", path, frame,
                 (unsigned long long) cs2_kcs_instructions(system_script),
                 cs2_kcs_pc(system_script), running == 0 ? ", the script ended" : "");
+
+        const cs2_layout *layout = cs2_system_layout(system);
+        if (layout != NULL) {
+            cs2_log("the front end is %s.fes, in #%s", cs2_layout_name(layout),
+                    cs2_layout_state(layout));
+        }
+        const cs2_kcs *flow = cs2_system_script(system);
+        if (flow != NULL) {
+            cs2_log("%s: %llu instructions, stopped at %#x", cs2_kcs_name(flow),
+                    (unsigned long long) cs2_kcs_instructions(flow), cs2_kcs_pc(flow));
+        }
+
+        int result = running < 0 ? 1 : 0;
+        const cs2_planes *planes = cs2_system_planes(system);
+        for (size_t i = 0; i < cs2_planes_count(planes); i++) {
+            const cs2_plane_state *plane = cs2_planes_at(planes, i);
+            cs2_log("  plane %u %-14s kind %-3d at %g,%g size %gx%g pri %g%s%s%s",
+                    plane->handle, plane->name, plane->type, (double) plane->x,
+                    (double) plane->y, (double) plane->width, (double) plane->height,
+                    (double) plane->priority, plane->visible ? " shown" : " hidden",
+                    plane->filled ? " painted" : "", plane->layout[0] != 0 ? " laid out" : "");
+        }
+        const cs2_scene *scenario = cs2_system_scenario(system);
+        if (scenario != NULL) {
+            cs2_log("the scenario is %s, %zu/%zu", cs2_scene_path(scenario),
+                    cs2_scene_cursor(scenario), cs2_scene_line_count(scenario));
+        }
+        if (shot != NULL) {
+            uint32_t *canvas = calloc((size_t) width * height, sizeof *canvas);
+            if (canvas == NULL) {
+                fprintf(stderr, "out of memory for a %dx%d frame\n", width, height);
+                result = 1;
+            } else {
+                /*
+                 * The screen is the scenario with the scripts' own planes over
+                 * it: the front end puts a scene script on the screen and hangs
+                 * its own furniture above it, so that is the order it is drawn.
+                 */
+                cs2_render *render = cs2_render_new(files, width, height);
+                if (render != NULL && scenario != NULL) {
+                    const uint32_t *drawn = cs2_render_frame(render, scenario, NULL);
+                    memcpy(canvas, drawn, (size_t) width * height * sizeof *canvas);
+                } else {
+                    for (size_t i = 0; i < (size_t) width * height; i++) canvas[i] = 0xff000000u;
+                }
+                cs2_system_draw(system, canvas, width, height);
+                if (cs2_png_write(shot, canvas, width, height) != 0) {
+                    fprintf(stderr, "%s\n", cs2_error());
+                    result = 1;
+                }
+                cs2_render_free(render);
+                free(canvas);
+            }
+        }
+        cs2_kcs_set_variables(system_script, NULL, 0);
         cs2_kcs_free(system_script);
         cs2_system_free(system);
         cs2_startup_free(startup);
         cs2_files_close(files);
-        return running < 0 ? 1 : 0;
+        return result;
     }
 
     cs2_text *text = cs2_text_from(startup);
@@ -277,8 +372,8 @@ int main(int argc, char **argv) {
     const char *skipped = cs2_scene_take_skipped(scene);
     if (skipped[0] != '\0') cs2_log("commands not carried out yet: %s", skipped);
 
-    int width = cs2_startup_number(startup, "SCREEN/width", 1024);
-    int height = cs2_startup_number(startup, "SCREEN/height", 576);
+    int width = screen_size(startup, "SCREEN/width", 1024);
+    int height = screen_size(startup, "SCREEN/height", 576);
     cs2_render *render = cs2_render_new(files, width, height);
     if (render == NULL) {
         fprintf(stderr, "%s\n", cs2_error());

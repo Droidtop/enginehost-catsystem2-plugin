@@ -553,4 +553,13 @@ const char *cs2_scene_text(const cs2_scene *scene) {
 }
 size_t cs2_scene_cursor(const cs2_scene *scene) { return scene->cursor; }
 size_t cs2_scene_line_count(const cs2_scene *scene) { return cs2_cst_count(scene->script); }
+
+const char *cs2_scene_line(const cs2_scene *scene, size_t index, unsigned *type) {
+    if (scene == NULL || scene->script == NULL || index >= cs2_cst_count(scene->script)) {
+        return NULL;
+    }
+    cs2_cst_line line = cs2_cst_at(scene->script, index);
+    if (type != NULL) *type = line.type;
+    return line.text;
+}
 int cs2_scene_ended(const cs2_scene *scene) { return scene->ended; }

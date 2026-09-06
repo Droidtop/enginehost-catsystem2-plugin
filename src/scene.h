@@ -79,6 +79,14 @@ size_t cs2_scene_cursor(const cs2_scene *scene);
 size_t cs2_scene_line_count(const cs2_scene *scene);
 int cs2_scene_ended(const cs2_scene *scene);
 
+/*
+ * One line of the script as it stands, and what kind of line it is. The system
+ * script reads the scenario's lines itself - the commands it registered are
+ * handed back to it word by word - so the words have to be reachable without
+ * the player having carried them out.
+ */
+const char *cs2_scene_line(const cs2_scene *scene, size_t index, unsigned *type);
+
 size_t cs2_scene_layer_count(const cs2_scene *scene);
 const cs2_layer *cs2_scene_layer_at(const cs2_scene *scene, size_t index);
 
