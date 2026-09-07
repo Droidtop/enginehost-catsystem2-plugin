@@ -112,6 +112,40 @@ static void feed_audio(void *user, Uint8 *stream, int bytes) {
     cs2_audio_mix(desktop_audio, (int16_t *) stream, bytes / (int) (2 * sizeof(int16_t)));
 }
 
+/*
+ * Opens the desktop's sound device and builds the mixer on the rate it really
+ * got. Both ways of running a game want this - the scene player and the game's
+ * own front end - and both want it the same way, so it is written once. NULL
+ * means the game plays silently, which is not an error: a machine with no sound
+ * card still runs the game.
+ *
+ * The device is left running rather than paused: nothing is playing yet, and
+ * the mixer answers silence until something is.
+ */
+static cs2_audio *open_sound(cs2_files *files, SDL_AudioDeviceID *device) {
+    SDL_AudioSpec wanted = {0}, got = {0};
+    wanted.freq = 48000;
+    wanted.format = AUDIO_S16SYS;
+    wanted.channels = 2;
+    wanted.samples = 1024;
+    wanted.callback = feed_audio;
+    *device = SDL_OpenAudioDevice(NULL, 0, &wanted, &got, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    if (*device == 0) {
+        cs2_log("no sound device (%s); playing silently", SDL_GetError());
+        return NULL;
+    }
+    cs2_audio *audio = cs2_audio_new(files, got.freq);
+    if (audio == NULL) {
+        cs2_log("%s", cs2_error());
+        SDL_CloseAudioDevice(*device);
+        *device = 0;
+        return NULL;
+    }
+    desktop_audio = audio;
+    SDL_PauseAudioDevice(*device, 0);
+    return audio;
+}
+
 /* The first script of scene.int, in name order, for a game we cannot boot. */
 static int first_scene_script(cs2_files *files, char *out, size_t out_size) {
     cs2_kif *archive = cs2_files_archive(files, "scene.int");
@@ -305,6 +339,26 @@ int main(int argc, char **argv) {
             fprintf(stderr, "%s\n", cs2_error());
             return 1;
         }
+        /*
+         * The game's own front end plays the game's own sound, so this way of
+         * running it opens a device too: hearing the game without Android is
+         * the point of the desktop build. A saved frame is a still picture and
+         * stays silent, deliberately - the script asks whether a voice is still
+         * speaking (160) and waits on the answer, so a run that draws a frame
+         * at a named frame number has to be one where nothing is sounding.
+         */
+        cs2_audio *audio = NULL;
+        SDL_AudioDeviceID sound = 0;
+        int sdl_started = 0;
+        if (!silent && shot == NULL) {
+            if (SDL_Init(SDL_INIT_AUDIO) != 0) {
+                cs2_log("no sound (%s); playing silently", SDL_GetError());
+            } else {
+                sdl_started = 1;
+                audio = open_sound(files, &sound);
+                cs2_system_set_audio(system, audio);
+            }
+        }
         /* The game's own layout sets the boot type; --boot overrides it. */
         if (boot_given) cs2_system_set_boot(system, boot_type, boot_scene);
         uint32_t variable_size = 0;
@@ -388,6 +442,10 @@ int main(int argc, char **argv) {
                 free(canvas);
             }
         }
+        if (sound != 0) SDL_CloseAudioDevice(sound);
+        desktop_audio = NULL;
+        cs2_audio_free(audio);
+        if (sdl_started) SDL_Quit();
         cs2_kcs_set_variables(system_script, NULL, 0);
         cs2_kcs_free(system_script);
         cs2_system_free(system);
@@ -467,28 +525,8 @@ int main(int argc, char **argv) {
     cs2_audio *audio = NULL;
     SDL_AudioDeviceID sound = 0;
     if (!silent) {
-        SDL_AudioSpec wanted = {0}, got = {0};
-        wanted.freq = 48000;
-        wanted.format = AUDIO_S16SYS;
-        wanted.channels = 2;
-        wanted.samples = 1024;
-        wanted.callback = feed_audio;
-        sound = SDL_OpenAudioDevice(NULL, 0, &wanted, &got, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
-        if (sound == 0) {
-            cs2_log("no sound device (%s); playing silently", SDL_GetError());
-        } else {
-            /* The device opens paused, so the mixer is in place before it runs. */
-            audio = cs2_audio_new(files, got.freq);
-            if (audio == NULL) {
-                cs2_log("%s", cs2_error());
-                SDL_CloseAudioDevice(sound);
-                sound = 0;
-            } else {
-                desktop_audio = audio;
-                cs2_scene_set_audio(scene, audio);
-                SDL_PauseAudioDevice(sound, 0);
-            }
-        }
+        audio = open_sound(files, &sound);
+        if (audio != NULL) cs2_scene_set_audio(scene, audio);
     }
 
     for (int i = 0; i < (steps < 1 ? 1 : steps); i++) cs2_scene_advance(scene);
