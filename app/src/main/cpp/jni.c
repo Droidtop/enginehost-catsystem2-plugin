@@ -342,6 +342,23 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeTouch(
 }
 
 /*
+ * Where the reader is pointing, without pressing anything. The screen the game
+ * has up keeps ONE selection: the button the pointer is over IS the button the
+ * pad is on, so a finger dragged across the title screen lights the button it
+ * passes over and the pad carries on from there. Java has already undone the
+ * scaling, so these are the game's own pixels.
+ */
+JNIEXPORT void JNICALL
+Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativePointer(
+        JNIEnv *env, jclass type, jlong handle, jint x, jint y) {
+    (void) env;
+    (void) type;
+    session *state = from_handle(handle);
+    if (state == NULL) return;
+    cs2_system_pointer(state->system, x, y);
+}
+
+/*
  * The pad. The d-pad walks the buttons of whatever screen is up, over the
  * layout's own KEYBLOCK grids; confirm presses the one it is on and also
  * advances the scenario, because on a console it is the same button for both.
