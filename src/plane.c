@@ -52,6 +52,8 @@ cs2_planes *cs2_planes_new(int width, int height) {
 }
 
 void cs2_planes_free(cs2_planes *planes) {
+    if (planes == NULL) return;
+    for (size_t i = 0; i < planes->count; i++) free(planes->entries[i].pixels);
     free(planes);
 }
 
@@ -78,6 +80,7 @@ cs2_plane cs2_plane_create(cs2_planes *planes, int type, cs2_plane parent, const
 void cs2_plane_destroy(cs2_planes *planes, cs2_plane handle) {
     cs2_plane_state *plane = find(planes, handle);
     if (plane == NULL || handle == planes->root) return;
+    free(plane->pixels);
     size_t index = (size_t) (plane - planes->entries);
     memmove(&planes->entries[index], &planes->entries[index + 1],
             (planes->count - index - 1) * sizeof *planes->entries);
@@ -86,6 +89,22 @@ void cs2_plane_destroy(cs2_planes *planes, cs2_plane handle) {
 
 cs2_plane_state *cs2_plane_get(cs2_planes *planes, cs2_plane handle) {
     return find(planes, handle);
+}
+
+void cs2_plane_set_picture(cs2_planes *planes, cs2_plane handle,
+                           uint32_t *pixels, int width, int height, int x, int y) {
+    cs2_plane_state *plane = find(planes, handle);
+    if (plane == NULL) {
+        free(pixels);
+        return;
+    }
+    if (plane->pixels == pixels) return;
+    free(plane->pixels);
+    plane->pixels = pixels;
+    plane->pixel_width = pixels == NULL ? 0 : width;
+    plane->pixel_height = pixels == NULL ? 0 : height;
+    plane->pixel_x = pixels == NULL ? 0 : x;
+    plane->pixel_y = pixels == NULL ? 0 : y;
 }
 
 size_t cs2_planes_count(const cs2_planes *planes) {
@@ -161,10 +180,31 @@ void cs2_planes_draw(const cs2_planes *planes, uint32_t *canvas, int width, int 
 
     for (size_t k = 0; k < planes->count; k++) {
         const cs2_plane_state *plane = &planes->entries[order[k]];
-        if (!plane->filled || !shown(planes, plane)) continue;
+        if (!shown(planes, plane)) continue;
         float fx = 0, fy = 0;
         absolute(planes, plane, &fx, &fy);
         int left = (int) fx, top = (int) fy;
+        /*
+         * A picture is drawn as itself, pixel for pixel, wherever the plane
+         * sits. It is not stretched to the plane's own width and height: the
+         * game sets those FROM the picture (engine function 714 answers the
+         * image's size and the script copies it onto the layer), so the two
+         * agree, and a picture the game has scaled arrives already scaled.
+         */
+        if (plane->pixels != NULL) {
+            for (int y = 0; y < plane->pixel_height; y++) {
+                int to_y = top + plane->pixel_y + y;
+                if (to_y < 0 || to_y >= height) continue;
+                for (int x = 0; x < plane->pixel_width; x++) {
+                    int to_x = left + plane->pixel_x + x;
+                    if (to_x < 0 || to_x >= width) continue;
+                    blend(&canvas[(size_t) to_y * width + to_x],
+                          plane->pixels[(size_t) y * plane->pixel_width + x]);
+                }
+            }
+            continue;
+        }
+        if (!plane->filled) continue;
         /*
          * A plane covers its own rectangle and no more. A plane with no size
          * used to be taken as the whole screen, and once a scene starts the

@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "cs2.h"
+#include "hg3.h"
 #include "layout.h"
 #include "scene.h"
 #include "startup.h"
@@ -113,6 +114,16 @@ struct cs2_system {
     } waiting[WAITING_LIMIT];
     size_t waiting_count;
     int boot_override;           /* the runner was told which boot to force */
+    /*
+     * The image list and the shelf of it the next picture goes on. main.kcs
+     * makes one plane to hold every picture a scene puts on the screen and
+     * keeps it in the persistent variables; before it makes or takes away a
+     * picture the system script sends that plane 0x114 with the layer's own
+     * depth, which says which shelf the work is on, and the pictures on a
+     * lower shelf are drawn first.
+     */
+    cs2_plane image_list;
+    int image_shelf;
     system_variable system_variables[SYSTEM_VARIABLES];
     size_t system_variable_count;
     system_string system_strings[SYSTEM_STRINGS];
@@ -520,6 +531,63 @@ static uint32_t object_message(cs2_system *system, cs2_kcs *script, uint32_t tar
             plane == NULL ? "no plane of this screen" : plane->name, message,
             at == 0 ? "" : carried);
     return 0;
+}
+
+
+/* ------------------------------------------------- the pictures a scene draws */
+
+/*
+ * A scene's picture is an object of the game's own class "image": the system
+ * script asks for one by name (710), is given a handle, asks it how big it is
+ * (714), puts it where the layer says (726) and throws it away again (711).
+ * Grisaia2.bin's 0x0051D620 builds it through the class factory at 0x008A8158
+ * under the name "image" and hangs it on the owner's list; here it is a plane
+ * carrying the picture's pixels, on the shelf of the image list the last 0x114
+ * named, which is the same order on the screen.
+ *
+ * The name is a file and nothing else - no folder, no extension and no frame
+ * id, unlike a .fes, which names a file AND the frame in it - so the picture is
+ * the file's first frame.
+ */
+static cs2_plane scene_image_load(cs2_system *system, const char *name) {
+    if (name == NULL || name[0] == 0) return 0;
+    char path[192];
+    snprintf(path, sizeof path, "image.int/%s.hg3", name);
+    cs2_bytes file = {0};
+    if (cs2_files_read(system->files, path, &file) != 0) {
+        cs2_log("the scene wants %s, which is not in this copy of the game", path);
+        return 0;
+    }
+    cs2_hg3_frame image = {0};
+    int decoded = cs2_hg3_decode(file.data, file.size, 0, &image);
+    cs2_bytes_free(&file);
+    if (decoded != 0) {
+        cs2_log("%s: %s", path, cs2_error());
+        return 0;
+    }
+    cs2_plane handle = cs2_plane_create(system->planes, 0, system->image_list, name);
+    cs2_plane_state *plane = cs2_plane_get(system->planes, handle);
+    if (plane == NULL) {
+        cs2_hg3_frame_free(&image);
+        return 0;
+    }
+    const cs2_plane_state *list = cs2_plane_get(system->planes, system->image_list);
+    plane->priority = (list == NULL ? 0.0f : list->priority) + (float) system->image_shelf;
+    plane->visible = 1;
+    plane->width = (float) image.width;
+    plane->height = (float) image.height;
+    cs2_log("the scene draws %s, %dx%d at %d,%d on shelf %d", path, image.width, image.height,
+            image.offset_x, image.offset_y, system->image_shelf);
+    cs2_plane_set_picture(system->planes, handle, image.pixels, image.width, image.height,
+                          image.offset_x, image.offset_y);
+    image.pixels = NULL;
+    cs2_hg3_frame_free(&image);
+    return handle;
+}
+
+static void write_word(cs2_kcs *script, uint32_t address, uint32_t value) {
+    void *out = cs2_kcs_at(script, address, (uint32_t) sizeof value);
+    if (out != NULL) memcpy(out, &value, sizeof value);
 }
 
 static void write_text(cs2_kcs *script, uint32_t address, const char *text) {
@@ -1198,8 +1266,44 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     case 258: {
         uint32_t values[] = { arg(arguments, argument_size, 1) };
         object_message(system, script, arg(arguments, argument_size, 0), 0x114, values, 1);
+        system->image_list = arg(arguments, argument_size, 0);
+        system->image_shelf = (int) (int32_t) values[0];
         return CS2_KCS_DONE;
     }
+    /*
+     * 710, 711, 714 and 726: the picture on a layer, made, thrown away, asked
+     * how big it is and put where the layer says. This is what turns `bg 0
+     * bg15t 0 0 0 0` into pixels: the command only writes "bg15t" into the
+     * layer table, and the redraw that follows asks for the picture by that
+     * name (Grisaia2.bin 0x0008E10A) and copies the answer into the layer.
+     */
+    case 710: {
+        *answer = scene_image_load(system,
+                                   cs2_kcs_text(script, arg(arguments, argument_size, 0)));
+        return CS2_KCS_DONE_VALUE;
+    }
+    case 711:
+        cs2_plane_destroy(system->planes, arg(arguments, argument_size, 0));
+        return CS2_KCS_DONE;
+    case 714: {
+        const cs2_plane_state *plane =
+            cs2_plane_get(system->planes, arg(arguments, argument_size, 0));
+        write_word(script, arg(arguments, argument_size, 1),
+                   plane == NULL ? 0 : (uint32_t) plane->pixel_width);
+        write_word(script, arg(arguments, argument_size, 2),
+                   plane == NULL ? 0 : (uint32_t) plane->pixel_height);
+        return CS2_KCS_DONE;
+    }
+    case 726: {
+        cs2_plane_state *plane =
+            cs2_plane_get(system->planes, arg(arguments, argument_size, 0));
+        if (plane != NULL) {
+            plane->x = (float) (int32_t) arg(arguments, argument_size, 1);
+            plane->y = (float) (int32_t) arg(arguments, argument_size, 2);
+        }
+        return CS2_KCS_DONE;
+    }
+
     case 520: {
         uint32_t values[] = { 0 };
         *answer = object_message(system, script, arg(arguments, argument_size, 0),

@@ -34,6 +34,15 @@ typedef struct {
     uint32_t colour;         /* ARGB, as the script writes it */
     char layout[64];         /* the .fes layout it was given, if any */
     cs2_plane attached;      /* the plane it was handed to work with */
+    /*
+     * A picture the plane draws instead of a flat colour: ARGB, top row first,
+     * pixel_width by pixel_height, owned by the plane. This is what the scene's
+     * own layers are - the game makes one image object per picture and hangs it
+     * on the image list - so a plane that has one is drawn from it.
+     */
+    uint32_t *pixels;
+    int pixel_width, pixel_height;
+    int pixel_x, pixel_y;    /* where the picture sits inside the plane */
     int running;             /* started, and not yet finished */
     int result;              /* what it finished with; -1 while it runs */
 } cs2_plane_state;
@@ -49,6 +58,14 @@ void cs2_plane_destroy(cs2_planes *planes, cs2_plane handle);
 
 /* NULL when the handle names no plane, which is how a script's mistake shows. */
 cs2_plane_state *cs2_plane_get(cs2_planes *planes, cs2_plane handle);
+
+/*
+ * Hands a plane a picture to draw. The pixels are ARGB with the top row first
+ * and the plane owns them from here on, freeing them when it is destroyed or
+ * given another; NULL takes the picture away again.
+ */
+void cs2_plane_set_picture(cs2_planes *planes, cs2_plane handle,
+                           uint32_t *pixels, int width, int height, int x, int y);
 
 /* Walking them in the order they were made, for logs and for saving. */
 size_t cs2_planes_count(const cs2_planes *planes);
