@@ -6,7 +6,10 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.util.Log;
 import android.view.Choreographer;
+import android.view.InputDevice;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import dev.enginehost.api.EngineControllerEvent;
@@ -40,9 +43,19 @@ public final class CatSystem2Plugin implements EnginePlugin {
     private static final int KEY_CONFIRM = 4;
     private static final int KEY_CANCEL = 5;
 
+    private static final String TAG = "catsystem2";
+
     private EnginePluginSession session;
     private long engine;
     private ScreenView view;
+    /*
+     * Whether the host has ever handed this plugin a controller event. Two
+     * device runs saw the pad do nothing at all, and this console's d-pad is a
+     * hat (AXIS_HAT_X/Y) with no KEYCODE_DPAD behind it, so the view takes the
+     * pad itself when - and only when - the host has delivered nothing. One or
+     * the other carries the pad, never both, so a press is never counted twice.
+     */
+    private boolean hostSendsThePad;
 
     @Override public void onCreate(EnginePluginSession session) throws Exception {
         this.session = session;
@@ -80,6 +93,14 @@ public final class CatSystem2Plugin implements EnginePlugin {
      * a right click. Nothing here decides what a button does.
      */
     @Override public boolean onControllerEvent(EngineControllerEvent event) {
+        /*
+         * Said before anything is made of it: when a run reports "the pad did
+         * nothing", the first thing to know is whether the pad reached the
+         * plugin at all, and until now nothing on this side of the native call
+         * could say.
+         */
+        Log.i(TAG, "the host hands over " + event.action() + (event.pressed() ? " down" : " up"));
+        hostSendsThePad = true;
         if (engine == 0 || !event.pressed()) return false;
         int key;
         switch (event.action()) {
@@ -122,6 +143,9 @@ public final class CatSystem2Plugin implements EnginePlugin {
             frame = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             source = new Rect(0, 0, width, height);
             setBackgroundColor(Color.BLACK);
+            setFocusable(true);
+            setFocusableInTouchMode(true);
+            requestFocus();
             setRunning(true);
         }
 
@@ -163,14 +187,87 @@ public final class CatSystem2Plugin implements EnginePlugin {
          * say which of its buttons it landed on.
          */
         @Override public boolean onTouchEvent(MotionEvent event) {
-            if (event.getAction() != MotionEvent.ACTION_UP || engine == 0) return true;
+            if (engine == 0) return true;
             float scale = scale();
             if (scale <= 0) return true;
             int x = Math.round((event.getX() - (getWidth() - width * scale) / 2) / scale);
             int y = Math.round((event.getY() - (getHeight() - height * scale) / 2) / scale);
-            nativeTouch(engine, x, y);
+            /*
+             * The finger moves the pointer and the lift presses it. The screen
+             * keeps one selection, so a finger dragged over a button focuses it
+             * exactly as the pad would, and the lift acts on that same button.
+             */
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_MOVE:
+                    nativePointer(engine, x, y);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    nativePointer(engine, x, y);
+                    nativeTouch(engine, x, y);
+                    return true;
+                default:
+                    return true;
+            }
+        }
+
+        /*
+         * The pad, when the host has sent none. This console reports its d-pad
+         * as a hat rather than as d-pad keys, so both are taken: a key event
+         * for the buttons and for a pad that does send keys, and the hat axes
+         * for one that does not. Focus and the pointer are the same selection
+         * on the engine's side, so a direction moves what a finger would have
+         * hovered.
+         */
+        @Override public boolean onKeyDown(int code, KeyEvent event) {
+            if (hostSendsThePad || engine == 0) return super.onKeyDown(code, event);
+            int key;
+            switch (code) {
+                case KeyEvent.KEYCODE_DPAD_UP: key = KEY_UP; break;
+                case KeyEvent.KEYCODE_DPAD_DOWN: key = KEY_DOWN; break;
+                case KeyEvent.KEYCODE_DPAD_LEFT: key = KEY_LEFT; break;
+                case KeyEvent.KEYCODE_DPAD_RIGHT: key = KEY_RIGHT; break;
+                case KeyEvent.KEYCODE_DPAD_CENTER:
+                case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_BUTTON_A: key = KEY_CONFIRM; break;
+                case KeyEvent.KEYCODE_BACK:
+                case KeyEvent.KEYCODE_BUTTON_B: key = KEY_CANCEL; break;
+                default: return super.onKeyDown(code, event);
+            }
+            Log.i(TAG, "the view takes key " + code + " itself");
+            nativeKey(engine, key);
             return true;
         }
+
+        /*
+         * A hat is an axis, not a key: it rests at zero and goes to -1 or 1
+         * while it is held. Only the move away from rest is a press, which is
+         * what a menu wants - one step per push of the pad.
+         */
+        @Override public boolean onGenericMotionEvent(MotionEvent event) {
+            if (hostSendsThePad || engine == 0) return super.onGenericMotionEvent(event);
+            if ((event.getSource() & InputDevice.SOURCE_CLASS_JOYSTICK) == 0) {
+                return super.onGenericMotionEvent(event);
+            }
+            int across = direction(event.getAxisValue(MotionEvent.AXIS_HAT_X));
+            int down = direction(event.getAxisValue(MotionEvent.AXIS_HAT_Y));
+            if (across == hatAcross && down == hatDown) return true;
+            hatAcross = across;
+            hatDown = down;
+            if (across < 0) nativeKey(engine, KEY_LEFT);
+            else if (across > 0) nativeKey(engine, KEY_RIGHT);
+            if (down < 0) nativeKey(engine, KEY_UP);
+            else if (down > 0) nativeKey(engine, KEY_DOWN);
+            return true;
+        }
+
+        private int direction(float value) {
+            if (value <= -0.5f) return -1;
+            return value >= 0.5f ? 1 : 0;
+        }
+
+        private int hatAcross;
+        private int hatDown;
     }
 
     private static native long nativeOpen(String gamePath, String script);
@@ -182,5 +279,6 @@ public final class CatSystem2Plugin implements EnginePlugin {
     private static native boolean nativeStep(long engine);
     private static native void nativeFrame(long engine, int[] pixels);
     private static native void nativeTouch(long engine, int x, int y);
+    private static native void nativePointer(long engine, int x, int y);
     private static native void nativeKey(long engine, int key);
 }
