@@ -1304,6 +1304,31 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         return CS2_KCS_DONE;
     }
 
+    /*
+     * 936 is the call that PLAYS a sound, and this says so rather than leaving
+     * it a number in a list. sscript keeps a table of sound sources - 268 bytes
+     * an entry, in the persistent bank - and once a source has a name in it the
+     * per-frame sound pass hands that name here and keeps the answer as the
+     * source's voice (0x0009C842), which 156 later stops, 161 gives a volume
+     * and 168 a place. The entry's own index says what kind of sound it is
+     * (0x0009C3C4): under 2 is music, under 12 an effect, under 22 a voice,
+     * which is where this engine's own 0/1/2 come from.
+     *
+     * It is NOT written, and deliberately: the mixer needs to know whether a
+     * sound loops, and `se 0 loop se571` puts that somewhere this reading has
+     * not found - not in any of the six arguments, which for a looping effect
+     * are kind, 0, the name, 1, 1 and a fade in the game's own frames. Playing
+     * everything once would drop the ambience under a scene and playing
+     * everything for ever would repeat a line of dialogue.
+     */
+    case 936:
+        cs2_log("%s: the scene asks to play %s of kind %d, fading over %d frames",
+                cs2_kcs_name(script),
+                cs2_kcs_text(script, arg(arguments, argument_size, 2)),
+                (int) arg(arguments, argument_size, 0),
+                (int) arg(arguments, argument_size, 5));
+        return CS2_KCS_UNWRITTEN;
+
     case 520: {
         uint32_t values[] = { 0 };
         *answer = object_message(system, script, arg(arguments, argument_size, 0),
