@@ -206,6 +206,25 @@ int cs2_audio_play(cs2_audio *audio, int kind, int bank, const char *name, int l
     return 0;
 }
 
+int cs2_audio_free_bank(cs2_audio *audio, int kind) {
+    if (audio == NULL) return -1;
+    pthread_mutex_lock(&audio->lock);
+    int bank = -1;
+    for (int wanted = 0; wanted < MAX_CHANNELS && bank < 0; wanted++) {
+        if (find(audio, kind, wanted) == NULL) bank = wanted;
+    }
+    pthread_mutex_unlock(&audio->lock);
+    return bank;
+}
+
+void cs2_audio_set_loop(cs2_audio *audio, int kind, int bank, int loop) {
+    if (audio == NULL) return;
+    pthread_mutex_lock(&audio->lock);
+    channel *slot = find(audio, kind, bank);
+    if (slot != NULL) slot->loop = loop;
+    pthread_mutex_unlock(&audio->lock);
+}
+
 static long fade_frames_to_samples(const cs2_audio *audio, int frames) {
     if (frames <= 0) return 0;
     return (long) frames * audio->rate / CS2_SOUND_FPS;

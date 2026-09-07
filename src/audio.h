@@ -43,6 +43,20 @@ int cs2_audio_rate(const cs2_audio *audio);
  */
 int cs2_audio_play(cs2_audio *audio, int kind, int bank, const char *name, int loop);
 
+/*
+ * A bank of one kind that nothing is sounding on, or -1 when every one of them
+ * is busy. The system script never names a bank when it plays a sound - it
+ * keeps only the voice the engine answers with - so the engine picks one.
+ */
+int cs2_audio_free_bank(cs2_audio *audio, int kind);
+
+/*
+ * Whether a sounding bank starts again at its end. The game settles this after
+ * it has started the sound, in a second call, so it has to be changeable while
+ * the sound is playing.
+ */
+void cs2_audio_set_loop(cs2_audio *audio, int kind, int bank, int loop);
+
 /* Stops a bank, over fade_frames of the game's frames (0 stops at once). */
 void cs2_audio_stop(cs2_audio *audio, int kind, int bank, int fade_frames);
 

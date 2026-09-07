@@ -33,6 +33,7 @@
 #define WAITING_LIMIT 4     /* the scripts that can be waiting for an event at once */
 #define EVENT_LIMIT 16      /* how many events one of them can be behind by */
 #define NAME_BYTES 32
+#define VOICE_LIMIT 24     /* the sounds the script can be holding at once */
 
 /*
  * A system variable, as 210 and 211 pass them about: the scripts hand the
@@ -74,6 +75,19 @@ typedef struct {
 
 struct cs2_system {
     cs2_files *files;
+    cs2_audio *audio;            /* the mixer 936 plays through, or NULL */
+    /*
+     * The voices the script is holding. The game's own engine answers 936
+     * with a pointer to the sound it started and the script keeps that in its
+     * sound entry, so what a voice IS is the engine's business: here it is a
+     * bank of the mixer, and the number the script keeps is this slot plus one
+     * (the script writes -1 for "no voice", so zero is never handed out).
+     */
+    struct {
+        int in_use;
+        int kind;
+        int bank;
+    } voices[VOICE_LIMIT];
     cs2_planes *planes;
     int width, height;
     uint64_t frame;              /* the game's own sixty a second */
@@ -322,7 +336,9 @@ const cs2_scene *cs2_system_scenario(const cs2_system *system) {
 
 /* The sound device, for the scenario the front end plays. */
 void cs2_system_set_audio(cs2_system *system, cs2_audio *audio) {
-    if (system != NULL) cs2_scene_set_audio(system->scene, audio);
+    if (system == NULL) return;
+    system->audio = audio;
+    cs2_scene_set_audio(system->scene, audio);
 }
 
 void cs2_system_set_boot(cs2_system *system, int type, const char *scenario) {
@@ -898,6 +914,33 @@ void cs2_system_frame(cs2_system *system) {
     if (running <= 0) host_stop_script(system);
 }
 
+/* ------------------------------------------------------------ the voices */
+
+/*
+ * A voice is a bank of the mixer, and the number the script keeps is the slot
+ * plus one. A sound that has finished on its own leaves its slot behind, so the
+ * slots are swept before one is handed out; a voice the script still holds is
+ * only ever dropped by the script, through 156.
+ */
+static void sweep_voices(cs2_system *system) {
+    for (int i = 0; i < VOICE_LIMIT; i++) {
+        if (!system->voices[i].in_use) continue;
+        if (!cs2_audio_playing(system->audio, system->voices[i].kind,
+                               system->voices[i].bank)) {
+            system->voices[i].in_use = 0;
+        }
+    }
+}
+
+static int voice_of(cs2_system *system, uint32_t handle, int *kind, int *bank) {
+    int32_t slot = (int32_t) handle - 1;
+    if (system->audio == NULL || slot < 0 || slot >= VOICE_LIMIT) return 0;
+    if (!system->voices[slot].in_use) return 0;
+    *kind = system->voices[slot].kind;
+    *bank = system->voices[slot].bank;
+    return 1;
+}
+
 /* ----------------------------------------------------------- the functions */
 
 int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
@@ -1305,29 +1348,124 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     }
 
     /*
-     * 936 is the call that PLAYS a sound, and this says so rather than leaving
-     * it a number in a list. sscript keeps a table of sound sources - 268 bytes
-     * an entry, in the persistent bank - and once a source has a name in it the
-     * per-frame sound pass hands that name here and keeps the answer as the
-     * source's voice (0x0009C842), which 156 later stops, 161 gives a volume
-     * and 168 a place. The entry's own index says what kind of sound it is
-     * (0x0009C3C4): under 2 is music, under 12 an effect, under 22 a voice,
-     * which is where this engine's own 0/1/2 come from.
+     * 936 is the call that PLAYS a sound; 156, 157, 160 and 161 are what the
+     * script does to it afterwards. The shape of this was read out of the
+     * system script and the game's engine together.
      *
-     * It is NOT written, and deliberately: the mixer needs to know whether a
-     * sound loops, and `se 0 loop se571` puts that somewhere this reading has
-     * not found - not in any of the six arguments, which for a looping effect
-     * are kind, 0, the name, 1, 1 and a fade in the game's own frames. Playing
-     * everything once would drop the ambience under a scene and playing
-     * everything for ever would repeat a line of dialogue.
+     * sscript keeps its sounds in a table of 268-byte entries in the persistent
+     * bank, and an entry's own index says what kind of sound it is
+     * (0x0009C3C4): under 2 is music, under 12 an effect, under 22 a voice,
+     * which is where this engine's own 0/1/2 come from. Once an entry has a
+     * name in it the per-frame sound pass calls 936(kind, 0, name, 1, 1, fade)
+     * and keeps the answer in the entry as its voice (0x0009C842). The engine
+     * is never told which bank to use - the script keeps nothing but that
+     * voice - so the engine picks one and the voice is how the bank is named
+     * back.
+     *
+     * WHETHER IT LOOPS is in none of 936's arguments, and that is what held
+     * this back. It is in the entry, at +184, and 157 carries it over right
+     * after 936 in the same pass (0x0009F0B0 reads it back: an entry whose +184
+     * is not 1 is left alone when the sound ends, and one whose +184 is not 0
+     * is freed). So +184 is PLAY ONCE, not "loop":
+     *   - the sound command handler writes it 1 for se and pcm and 0 for bgm
+     *     (sscript 0x0005224B), which is why music repeats and an effect or a
+     *     line of dialogue does not;
+     *   - the "loop" option - keyword 53 of the option table [0x43388],
+     *     dispatched at 0x000526B5 to its handler at 0x00056103 - writes it 0,
+     *     so "se 0 loop se571" is an effect that keeps going.
+     * 157 is message 0xB4 to the sound (Grisaia2.bin 0x0050BAF0), 156 is 0xB3
+     * (stop), 160 is 0xB7 (is it still sounding) and 161 is 0xB8 (volume).
+     *
+     * 936 therefore starts the sound the way the command's own default would
+     * have it, which is what 157 then confirms or changes, so a script that
+     * never sends 157 still gets what its command asked for.
      */
-    case 936:
-        cs2_log("%s: the scene asks to play %s of kind %d, fading over %d frames",
-                cs2_kcs_name(script),
-                cs2_kcs_text(script, arg(arguments, argument_size, 2)),
-                (int) arg(arguments, argument_size, 0),
-                (int) arg(arguments, argument_size, 5));
-        return CS2_KCS_UNWRITTEN;
+    case 936: {
+        int kind = (int) arg(arguments, argument_size, 0);
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 2));
+        int fade = (int) arg(arguments, argument_size, 5);
+        if (kind < CS2_SOUND_BGM || kind > CS2_SOUND_PCM) kind = CS2_SOUND_SE;
+        *answer = (uint32_t) -1;
+        if (system->audio == NULL || name == NULL || name[0] == 0) {
+            return CS2_KCS_DONE_VALUE;
+        }
+        sweep_voices(system);
+        int slot = -1;
+        for (int i = 0; i < VOICE_LIMIT && slot < 0; i++) {
+            if (!system->voices[i].in_use) slot = i;
+        }
+        int bank = cs2_audio_free_bank(system->audio, kind);
+        if (slot < 0 || bank < 0) {
+            cs2_log("%s: no free bank to play %s on", cs2_kcs_name(script), name);
+            return CS2_KCS_DONE_VALUE;
+        }
+        if (cs2_audio_play(system->audio, kind, bank, name,
+                           kind == CS2_SOUND_BGM) != 0) {
+            cs2_log("%s: %s", cs2_kcs_name(script), cs2_error());
+            return CS2_KCS_DONE_VALUE;
+        }
+        /* The last argument is a fade-in, in the game's own frames. */
+        if (fade > 0) cs2_audio_volume(system->audio, kind, bank, 0, 100, fade);
+        system->voices[slot].in_use = 1;
+        system->voices[slot].kind = kind;
+        system->voices[slot].bank = bank;
+        cs2_log("%s: playing %s (%s) on bank %d", cs2_kcs_name(script), name,
+                kind == CS2_SOUND_BGM ? "music" : kind == CS2_SOUND_PCM ? "voice" : "effect",
+                bank);
+        *answer = (uint32_t) (slot + 1);
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /* 156: stop this voice. The script forgets it straight afterwards. */
+    case 156: {
+        int kind, bank;
+        uint32_t handle = arg(arguments, argument_size, 0);
+        if (voice_of(system, handle, &kind, &bank)) {
+            cs2_audio_stop(system->audio, kind, bank, 0);
+            system->voices[handle - 1].in_use = 0;
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /*
+     * 157: play once, or keep going. The argument is the sound entry's +184,
+     * which is 1 for "play it once", so looping is that argument being zero.
+     */
+    case 157: {
+        int kind, bank;
+        if (voice_of(system, arg(arguments, argument_size, 0), &kind, &bank)) {
+            cs2_audio_set_loop(system->audio, kind, bank,
+                               arg(arguments, argument_size, 1) == 0);
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /*
+     * 160: is this voice still sounding. It is how the script asks whether a
+     * line of dialogue has finished being spoken, so it is read every frame.
+     */
+    case 160: {
+        int kind, bank;
+        *answer = voice_of(system, arg(arguments, argument_size, 0), &kind, &bank)
+            && cs2_audio_playing(system->audio, kind, bank);
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 161: this voice's volume, and it is NOT applied yet, on purpose.
+     *
+     * The script works the level out per frame (sscript 0x0009F781) as a chain
+     * of percentages: the player's setting for the kind, the per-sound levels
+     * that 605, 606, 607, 964 and 995 look up BY NAME in a table of the game's
+     * own, and a duck while a voice is speaking (it walks the voice entries
+     * with 160). Every one of those lookups is a table this engine does not
+     * read yet, so they all answer zero and the product is zero: applying it
+     * today would silence every sound the moment it started. The level is a
+     * percentage - the reading is not in doubt, only the numbers going into it
+     * - so this waits for the volume tables rather than for more reading.
+     */
+    case 161:
+        return CS2_KCS_UNWRITTEN_WITH(CS2_KCS_DONE);
 
     case 520: {
         uint32_t values[] = { 0 };
