@@ -53,6 +53,12 @@ typedef struct {
     cs2_fes_kind kind;
     char file[64];               /* FILE: the image or sound it draws from */
     char plane[40];              /* PL: the plane it is drawn on */
+    /*
+     * MASK: the object is not a picture to put on the screen, it is the shape
+     * something else is drawn through. The message window's face plate is one:
+     * img_facemask is the outline the character's face picture is cut to.
+     */
+    int mask;
     int ids[CS2_FES_IDS];        /* ID.0..ID.5, -1 where the table has none */
     /*
      * POS2 and SIZE2 are sometimes not numbers but a picture: "$str900:10" is

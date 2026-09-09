@@ -53,6 +53,13 @@ struct object_state {
     int fade_left;
     int fade_from, fade_to;
     int boxes_read;          /* its picture has been asked where it is */
+    /*
+     * A FILE column that is a reference rather than a name: the message window
+     * draws every one of its pieces out of "$str900", the game's numbered
+     * string for its own window theme. The reference is kept because the
+     * string is set while the game runs and can be set again.
+     */
+    char file_reference[64];
     object_box boxes[CS2_FES_IDS];
 
     /*
@@ -882,6 +889,12 @@ cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layou
         }
         for (size_t i = 0; i < layout->object_count; i++) {
             layout->objects[i].declared = *cs2_fes_object_at(layout->fes, i);
+            if (strncmp(layout->objects[i].declared.file, "$str", 4) == 0) {
+                snprintf(layout->objects[i].file_reference,
+                         sizeof layout->objects[i].file_reference, "%s",
+                         layout->objects[i].declared.file);
+                layout->objects[i].declared.file[0] = 0;
+            }
             layout->objects[i].alpha = 255;
             layout->objects[i].current_id = 0;
         }
@@ -1064,6 +1077,14 @@ static void draw_one(cs2_layout *layout, const object_state *object,
         return;
     }
     if (object->declared.kind != CS2_FES_IMAGE && object->declared.kind != CS2_FES_BUTTON) return;
+    /*
+     * A MASK is a shape, not a picture: the face plate's mask is the outline
+     * the character's face is cut to, and the file behind it is a flat block
+     * of colour. Drawing it as a picture puts that block on the screen, which
+     * is what it did until this line; drawing through it is what the object
+     * asks for and this engine has no masked blend yet, so it draws neither.
+     */
+    if (object->declared.mask != 0) return;
     if (object->declared.file[0] == 0) return;
     int id = object->declared.ids[shown_id(object)];
     if (id < 0) return;
@@ -1104,6 +1125,12 @@ static void draw_one(cs2_layout *layout, const object_state *object,
 
 void cs2_layout_draw(cs2_layout *layout, uint32_t *canvas, int width, int height) {
     if (layout == NULL) return;
+    /*
+     * Before anything is drawn, because a picture named by a reference has no
+     * file until it is resolved and the message window's whole frame is named
+     * that way. The answers are kept, so this costs one pass over the objects.
+     */
+    ensure_boxes(layout);
     size_t count = layout->object_count;
     if (count == 0) {
         cs2_layout_draw(layout->child, canvas, width, height);
@@ -1149,6 +1176,30 @@ void cs2_layout_draw(cs2_layout *layout, uint32_t *canvas, int width, int height
  * and its size are the frame's own offset and size, which is the same rule
  * every button on the title screen is found by.
  */
+/*
+ * A picture named by a reference rather than by a file: the message window's
+ * whole theme is "$str900", the numbered string the system script writes the
+ * window picture into (sys_mwnd for Grisaia's default theme), so until that
+ * string is set the window has no frame to draw and after it is set every
+ * piece of the window draws out of it. The name comes with its suffix and the
+ * FILE column is written without one, the same as the box references.
+ */
+static void resolve_the_file(cs2_layout *layout, object_state *object) {
+    if (object->file_reference[0] == 0 || layout->host.string == NULL) return;
+    const char *name = layout->host.string(layout->host.context,
+                                           atoi(object->file_reference + 4));
+    if (name == NULL || name[0] == 0) return;
+    char wanted[64];
+    snprintf(wanted, sizeof wanted, "%s", name);
+    size_t length = strlen(wanted);
+    if (length > 4 && cs2_ieq(wanted + length - 4, ".hg3")) wanted[length - 4] = 0;
+    if (strcmp(wanted, object->declared.file) == 0) return;
+    snprintf(object->declared.file, sizeof object->declared.file, "%s", wanted);
+    object->boxes_read = 0;
+    cs2_log("%s.fes: %s is %s", cs2_fes_name(layout->fes), object->declared.name,
+            object->declared.file);
+}
+
 static void resolve_the_box(cs2_layout *layout, object_state *object) {
     const char *from = object->declared.box_from;
     if (from[0] == 0 || object->declared.file[0] != 0) return;
@@ -1176,6 +1227,7 @@ static void resolve_the_box(cs2_layout *layout, object_state *object) {
 
 static void ensure_boxes(cs2_layout *layout) {
     for (size_t i = 0; i < layout->object_count; i++) {
+        resolve_the_file(layout, &layout->objects[i]);
         resolve_the_box(layout, &layout->objects[i]);
     }
     for (size_t i = 0; i < layout->object_count; i++) {
