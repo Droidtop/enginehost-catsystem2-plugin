@@ -23,6 +23,7 @@
 #include "layout.h"
 #include "scene.h"
 #include "startup.h"
+#include "volume.h"
 
 #define DOCUMENT_LIMIT 8
 #define LAYOUT_LIMIT 8
@@ -96,6 +97,7 @@ struct cs2_system {
     int scenario;                /* 789 answers this; 209 makes its interpreter */
     int interpreter;
     cs2_startup *settings;       /* the game's startup.xml, for the message format */
+    cs2_volumes *volumes;        /* and, out of the same document, the sound levels */
     cs2_text *format;
     cs2_scene *scene;            /* what 325 has loaded, and 330 steps */
     int scene_loaded;
@@ -265,6 +267,7 @@ cs2_system *cs2_system_new(cs2_files *files, int width, int height) {
         system->settings = cs2_startup_parse(document.data, document.size);
         cs2_bytes_free(&document);
     }
+    system->volumes = cs2_volumes_read(system->settings);
     system->format = cs2_text_from(system->settings);
     system->scene = system->format == NULL ? NULL : cs2_scene_new(files, system->format);
     if (system->scene == NULL) {
@@ -286,6 +289,7 @@ void cs2_system_free(cs2_system *system) {
     cs2_planes_free(system->planes);
     cs2_scene_free(system->scene);
     cs2_text_free(system->format);
+    cs2_volumes_free(system->volumes);
     cs2_startup_free(system->settings);
     for (size_t i = 0; i < system->system_string_count; i++) {
         free(system->system_strings[i].value);
@@ -1452,20 +1456,63 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
     }
 
     /*
-     * 161: this voice's volume, and it is NOT applied yet, on purpose.
+     * 161: this voice's volume, and it is APPLIED now that the tables the level
+     * is built out of are read (volume.h).
      *
      * The script works the level out per frame (sscript 0x0009F781) as a chain
-     * of percentages: the player's setting for the kind, the per-sound levels
-     * that 605, 606, 607, 964 and 995 look up BY NAME in a table of the game's
-     * own, and a duck while a voice is speaking (it walks the voice entries
-     * with 160). Every one of those lookups is a table this engine does not
-     * read yet, so they all answer zero and the product is zero: applying it
-     * today would silence every sound the moment it started. The level is a
-     * percentage - the reading is not in doubt, only the numbers going into it
-     * - so this waits for the volume tables rather than for more reading.
+     * of percentages - the player's setting for the kind (605), the level the
+     * game balances the channel at (607), the player's own level for the
+     * channel (606), a per-sound list the script may register (964, 995), and a
+     * duck while a voice is speaking - and hands the product to the sound here.
+     * It is a percentage, so this is the sound's level outright.
      */
-    case 161:
-        return CS2_KCS_UNWRITTEN_WITH(CS2_KCS_DONE);
+    case 161: {
+        int kind, bank;
+        if (voice_of(system, arg(arguments, argument_size, 0), &kind, &bank)) {
+            int level = (int) (int32_t) arg(arguments, argument_size, 1);
+            cs2_audio_volume(system->audio, kind, bank, -1, level, 0);
+        }
+        return CS2_KCS_DONE;
+    }
+
+    /*
+     * 605, 606 and 607: the three levels the script looks up BY THE SOUND'S OWN
+     * NAME. Each is the name of a channel's <head> in the game's own
+     * startup.xml, and volume.h answers all three out of that document: 605 the
+     * player's setting for the kind the channel's group is, 607 the level the
+     * game itself balances the channel at, 606 the player's own level for that
+     * one channel. Each answers a percentage; the script multiplies them.
+     *
+     * The name is the argument, and the answer goes back through the second
+     * argument, which is the address of the script's own variable: these three
+     * hand their answer over that way rather than as a return value
+     * (Grisaia2.bin 0x00515300, 0x005152C0, 0x00515280 all end `mov [ecx], eax;
+     * mov eax, 1`, the 1 being "the call worked").
+     */
+    case 605:
+    case 606:
+    case 607: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 0));
+        int level = id == 605 ? cs2_volumes_group(system->volumes, name)
+                  : id == 606 ? cs2_volumes_play(system->volumes, name)
+                              : cs2_volumes_master(system->volumes, name);
+        *answer = (uint32_t) level;
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 964 and 995: a per-sound level out of a list the script itself registers
+     * at run time (a vector of 0xC4-byte records at Grisaia2.bin's sound object
+     * +0x20C58, walked by name at 0x005A9740 and 0x005A9960). Nothing in
+     * Grisaia's own scripts ever puts a record in it, so both answer the level
+     * they start from, which their own code writes as 100 - the identity of the
+     * chain the script multiplies. This engine keeps no such list, so it
+     * answers the same, and says so rather than pretending to have looked.
+     */
+    case 964:
+    case 995:
+        *answer = 100;
+        return CS2_KCS_DONE_VALUE;
 
     case 520: {
         uint32_t values[] = { 0 };
