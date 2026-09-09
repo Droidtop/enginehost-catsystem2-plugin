@@ -202,6 +202,8 @@ static void set_column(cs2_fes_object *object, const char *column, const char *v
         object->priority = atoi(value);
     } else if (strcmp(column, "DISP") == 0) {
         object->disp = atoi(value);
+    } else if (strcmp(column, "MASK") == 0) {
+        object->mask = atoi(value);
     } else if (strcmp(column, "ENABLE") == 0) {
         object->enable = atoi(value);
     } else if (strcmp(column, "KEYBLOCK") == 0) {
@@ -215,9 +217,9 @@ static void set_column(cs2_fes_object *object, const char *column, const char *v
         }
     }
     /* VRAM is where the surface is put in the game's own texture sheet, and
-       GROUP, STYPE, CHANNEL, COLOR and MASK belong to sound and to drawing
-       modes this engine does not have yet; none of them changes where a thing
-       is on the screen, so they are read past. */
+       GROUP, STYPE, CHANNEL and COLOR belong to sound and to drawing modes
+       this engine does not have yet; none of them changes where a thing is on
+       the screen, so they are read past. */
 }
 
 static void table_row(cs2_fes *fes, const char *line,
