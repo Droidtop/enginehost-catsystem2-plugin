@@ -301,6 +301,24 @@ static int32_t evaluate(cs2_layout *layout, const char *text) {
     return expression(&r);
 }
 
+/*
+ * Which variable a line is writing. A variable's own number is an expression
+ * like everything else in these files, and it is written in brackets when it
+ * is one: the save screen fills a row of locals as it walks the slots, one
+ * per panel. Reading that number as digits answered 0 every time, so the
+ * screen wrote over the counter it was walking with and never came out of
+ * its own loop.
+ */
+static int variable_number(cs2_layout *layout, const char *after_sigil) {
+    reader r = { layout, after_sigil };
+    skip_space(&r);
+    if (*r.at == '(') {
+        r.at++;
+        return (int) expression(&r);
+    }
+    return (int) strtol(r.at, NULL, 10);
+}
+
 /* -------------------------------------------------------------- the objects */
 
 /*
@@ -776,14 +794,13 @@ static void run_lines(cs2_layout *layout, int one_frame) {
             const char *equals = strchr(line, '=');
             if (equals != NULL && equals[1] != '=') {
                 int32_t value = evaluate(layout, equals + 1);
+                int number = variable_number(layout, line + 1);
                 if (line[0] == '$') {
-                    int number = atoi(line + 1);
                     if (layout->host.set_flag != NULL) {
                         layout->host.set_flag(layout->host.context, number, value);
                     }
-                } else {
-                    int number = atoi(line + 1);
-                    if (number >= 0 && number < LOCALS) layout->locals[number] = value;
+                } else if (number >= 0 && number < LOCALS) {
+                    layout->locals[number] = value;
                 }
             }
             layout->line++;
