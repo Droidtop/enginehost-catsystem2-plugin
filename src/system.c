@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "cs2.h"
 #include "hg3.h"
@@ -116,6 +117,13 @@ struct cs2_system {
     } layouts[LAYOUT_LIMIT];
     size_t layout_count;
     cs2_kcs *flow;               /* the system script the layout has run */
+    cs2_saves *saves;            /* the game's own saves, or NULL for a game with nowhere to put them */
+    /*
+     * How far the reader has read in each scenario: what 328 raises and 329
+     * answers. It is kept in the shape a save keeps it in, so that writing one
+     * and reading one back needs no second table.
+     */
+    cs2_save read;
     /*
      * The events each waiting script has still to be told about. A script
      * registers itself the first time it waits (71), and an event is posted to
@@ -286,6 +294,8 @@ void cs2_system_free(cs2_system *system) {
         cs2_kcs_set_variables(system->flow, NULL, 0);
         cs2_kcs_free(system->flow);
     }
+    cs2_saves_free(system->saves);
+    cs2_save_clear(&system->read);
     cs2_planes_free(system->planes);
     cs2_scene_free(system->scene);
     cs2_text_free(system->format);
@@ -339,6 +349,102 @@ const cs2_scene *cs2_system_scenario(const cs2_system *system) {
 }
 
 /* The sound device, for the scenario the front end plays. */
+void cs2_system_set_save_folder(cs2_system *system, const char *folder) {
+    if (system == NULL) return;
+    cs2_saves_free(system->saves);
+    system->saves = cs2_saves_open(folder);
+    if (system->saves == NULL) {
+        cs2_log("this game cannot save: %s", cs2_error());
+    } else {
+        cs2_log("saves are kept in %s", cs2_saves_folder(system->saves));
+        /*
+         * And with the folder comes what the player has read. The game's own
+         * record file is not a save: it survives every save being deleted,
+         * which is what a "skip read text" is for.
+         */
+        cs2_save_clear(&system->read);
+        if (cs2_saves_read_named(system->saves, "savegen.dat", &system->read) == 0) {
+            cs2_log("the player has read %zu scenarios before", system->read.mark_count);
+        }
+    }
+}
+
+/*
+ * What a save is made of, and what putting one back means.
+ *
+ * The story's own state is the numbered flags and strings - the bank a script
+ * reads with 210 and writes with 211 - plus how far the reader has read in
+ * each scenario. What makes a loaded game a game being READ, rather than one
+ * that merely knows which scenario it is on, is the system script's own
+ * globals: its reading machine keeps everything about where it is in there.
+ * They are carried as one block and not a word of them is named, because what
+ * each word means is a fact about that game's compiled script.
+ */
+static void snapshot(cs2_system *system, cs2_save *into) {
+    memset(into, 0, sizeof *into);
+    into->when = (int64_t) time(NULL);
+    if (system->scene_loaded) {
+        snprintf(into->scenario, sizeof into->scenario, "%s", cs2_scene_path(system->scene));
+        into->cursor = (uint32_t) cs2_scene_cursor(system->scene);
+    }
+    for (size_t i = 0; i < system->system_variable_count; i++) {
+        cs2_save_set_flag(into, system->system_variables[i].key,
+                          (int32_t) system->system_variables[i].value);
+    }
+    for (size_t i = 0; i < system->system_string_count; i++) {
+        cs2_save_set_string(into, system->system_strings[i].key,
+                            system->system_strings[i].value);
+    }
+    for (size_t i = 0; i < system->read.mark_count; i++) {
+        cs2_save_set_mark(into, system->read.marks[i].name, system->read.marks[i].mark);
+    }
+    if (system->flow != NULL) {
+        uint32_t size = 0;
+        const void *globals = cs2_kcs_globals(system->flow, &size);
+        cs2_save_set_globals(into, cs2_kcs_name(system->flow), globals, size);
+    }
+}
+
+/* Answers 0 when the game is back where the save left it. */
+static int restore(cs2_system *system, cs2_kcs *script, const cs2_save *from) {
+    for (size_t i = 0; i < from->flag_count; i++) {
+        cs2_system_set_variable(system, from->flags[i].key, (uint32_t) from->flags[i].value);
+    }
+    for (size_t i = 0; i < from->string_count; i++) {
+        cs2_system_set_string(system, from->strings[i].key, from->strings[i].text);
+    }
+    for (size_t i = 0; i < from->mark_count; i++) {
+        cs2_save_set_mark(&system->read, from->marks[i].name, from->marks[i].mark);
+    }
+    if (from->scenario[0] == 0) {
+        cs2_set_error("that save was written with no scenario on the screen");
+        return -1;
+    }
+    if (cs2_scene_play(system->scene, from->scenario) != 0) return -1;
+    cs2_scene_seek(system->scene, from->cursor);
+    system->scene_loaded = 1;
+    system->scene_step = 0;
+    if (from->globals == NULL) {
+        cs2_set_error("that save carries no script state");
+        return -1;
+    }
+    return cs2_kcs_set_globals(script, from->globals, (uint32_t) from->globals_size);
+}
+
+static int save_now(cs2_system *system, int slot) {
+    if (system->saves == NULL) {
+        cs2_log("save %d was asked for and this game has nowhere to put one", slot);
+        return -1;
+    }
+    cs2_save save;
+    snapshot(system, &save);
+    int written = cs2_saves_write(system->saves, slot, &save);
+    if (written != 0) cs2_log("%s", cs2_error());
+    else cs2_log("save %d written: %s at %u", slot, save.scenario, save.cursor);
+    cs2_save_clear(&save);
+    return written;
+}
+
 void cs2_system_set_audio(cs2_system *system, cs2_audio *audio) {
     if (system == NULL) return;
     system->audio = audio;
@@ -784,6 +890,80 @@ static void host_stop_script(void *context) {
     system->flow = NULL;
 }
 
+static void host_post(void *context, uint32_t class_, uint32_t word, uint32_t code) {
+    cs2_system_post(context, class_, word, code);
+}
+
+/*
+ * What the save and load screen asks. Everything it asks is about a slot it
+ * has not loaded, so each of these opens the slot, answers, and puts it down
+ * again; a save screen shows eight panels and asks about them once a page.
+ */
+static int host_save_exists(void *context, int slot) {
+    cs2_system *system = context;
+    return system->saves != NULL && cs2_saves_exists(system->saves, slot);
+}
+
+static int host_save_newest(void *context, int from, int to) {
+    cs2_system *system = context;
+    return system->saves == NULL ? -1 : cs2_saves_newest(system->saves, from, to);
+}
+
+static int host_save_write(void *context, int slot) {
+    return save_now(context, slot);
+}
+
+static int host_save_delete(void *context, int slot) {
+    cs2_system *system = context;
+    return system->saves == NULL ? -1 : cs2_saves_delete(system->saves, slot);
+}
+
+static int host_save_exchange(void *context, int a, int b) {
+    cs2_system *system = context;
+    return system->saves == NULL ? -1 : cs2_saves_exchange(system->saves, a, b);
+}
+
+static int host_save_copy(void *context, int from, int to) {
+    cs2_system *system = context;
+    return system->saves == NULL ? -1 : cs2_saves_copy(system->saves, from, to);
+}
+
+static int host_save_flag(void *context, int slot, int number, int32_t *value) {
+    cs2_system *system = context;
+    cs2_save save = { 0 };
+    if (system->saves == NULL || cs2_saves_read(system->saves, slot, &save) != 0) return 0;
+    int found = cs2_save_flag_value(&save, (uint32_t) number, value);
+    cs2_save_clear(&save);
+    return found;
+}
+
+/*
+ * The title and the message a save carries. The answer has to outlive the
+ * save it was read out of, so it is kept here until the next one is asked
+ * for, which is as long as the screen needs it: it copies it straight into
+ * one of the game's own numbered strings.
+ */
+static const char *host_save_string(void *context, int slot, uint32_t what) {
+    cs2_system *system = context;
+    static char answer[512];
+    answer[0] = 0;
+    cs2_save save = { 0 };
+    if (system->saves == NULL || cs2_saves_read(system->saves, slot, &save) != 0) return answer;
+    const char *text = cs2_save_string_value(&save, what);
+    if (text != NULL) snprintf(answer, sizeof answer, "%s", text);
+    cs2_save_clear(&save);
+    return answer;
+}
+
+static void host_save_set_string(void *context, int slot, uint32_t what, const char *text) {
+    cs2_system *system = context;
+    cs2_save save = { 0 };
+    if (system->saves == NULL || cs2_saves_read(system->saves, slot, &save) != 0) return;
+    cs2_save_set_string(&save, what, text);
+    if (cs2_saves_write(system->saves, slot, &save) != 0) cs2_log("%s", cs2_error());
+    cs2_save_clear(&save);
+}
+
 static void forget_the_layout(cs2_system *system, cs2_plane handle) {
     for (size_t i = 0; i < system->layout_count; i++) {
         if (system->layouts[i].plane != handle) continue;
@@ -815,8 +995,24 @@ static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
         return;
     }
     cs2_layout_host host = {
-        system, host_flag, host_set_flag, host_set_string, host_text_of,
-        host_string, host_run_script, host_stop_script
+        .context = system,
+        .flag = host_flag,
+        .set_flag = host_set_flag,
+        .set_string = host_set_string,
+        .text_of = host_text_of,
+        .string = host_string,
+        .run_script = host_run_script,
+        .stop_script = host_stop_script,
+        .post = host_post,
+        .save_exists = host_save_exists,
+        .save_newest = host_save_newest,
+        .save_write = host_save_write,
+        .save_delete = host_save_delete,
+        .save_exchange = host_save_exchange,
+        .save_copy = host_save_copy,
+        .save_flag = host_save_flag,
+        .save_string = host_save_string,
+        .save_set_string = host_save_set_string,
     };
     cs2_layout *started = cs2_layout_start(system->files, plane->layout, &host);
     if (started == NULL) {
@@ -1258,6 +1454,100 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
      * at, the value it ends at, which shape the run has, how long it lasts and
      * how far in it is; 319 rounds that to a whole number.
      */
+    /*
+     * 70: load a saved game. This is the whole of load.
+     *
+     * The save screen does not load anything: it writes the slot into the
+     * game's boot flag and exits, flow.fes runs the system script again, and
+     * the system script's own boot switches on that number - -1 a new game,
+     * -2 a recollection, -10 scene select, anything else the number of a save.
+     * The save branch makes exactly this one call, with the plane it is
+     * running under and the slot, and then falls into its frame loop. So the
+     * game's own load path needs nothing new: it needs this call to put the
+     * story's state and the script's own state back before the loop starts.
+     */
+    case 70: {
+        int slot = (int) (int32_t) arg(arguments, argument_size, 3);
+        *answer = 0;
+        if (system->saves == NULL) {
+            cs2_log("%s asked to load save %d and this game has no save folder",
+                    cs2_kcs_name(script), slot);
+            return CS2_KCS_DONE_VALUE;
+        }
+        cs2_save save = { 0 };
+        if (cs2_saves_read(system->saves, slot, &save) != 0) {
+            cs2_log("%s", cs2_error());
+            return CS2_KCS_DONE_VALUE;
+        }
+        if (restore(system, script, &save) != 0) {
+            cs2_log("save %d cannot be put back: %s", slot, cs2_error());
+        } else {
+            cs2_log("save %d loaded: %s at %u", slot, save.scenario, save.cursor);
+            *answer = 1;
+        }
+        cs2_save_clear(&save);
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 328 and 329: how far the reader has read in a scenario.
+     *
+     * Both are called with (scenario, name, line) and both go to a list keyed
+     * by the scenario's name whose entry keeps one number, raised and never
+     * lowered. 328 raises it; 329 raises it and answers it, -1 for a scenario
+     * with no entry yet. That is the high-water mark a "skip read text" and a
+     * scene gallery are made of, and it is saved data: it goes into the save
+     * beside the flags and comes back with it.
+     */
+    case 328:
+    case 329: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        int32_t line = (int32_t) arg(arguments, argument_size, 2);
+        cs2_save_set_mark(&system->read, name, line);
+        if (id == 328) return CS2_KCS_DONE;
+        *answer = (uint32_t) cs2_save_mark_value(&system->read, name);
+        return CS2_KCS_DONE_VALUE;
+    }
+
+    /*
+     * 245: write the game's own data to a file the script names.
+     *
+     * This is what the in-game quick save ends in: the system script builds
+     * the save object out of 113/362/112/116/241/114 - the picture that goes
+     * on the panel - and then hands it to 245 with the file name, and the
+     * file names it uses say the whole of what it is doing. "save0160.dat" is
+     * slot 160, which is page 20 times eight: the first quick save, exactly as
+     * the game's own layouts number their pages. "savegen.dat" is the record
+     * that belongs to the player rather than to any one save - what has been
+     * read, what has been seen - which is where the marks 328 and 329 keep
+     * belong when the game is not being saved.
+     *
+     * The name is the script's, not this engine's, so this stays true for a
+     * game whose script names its files differently: what is read out of the
+     * name is only whether it is one of the numbered saves.
+     */
+    case 245: {
+        const char *name = cs2_kcs_text(script, arg(arguments, argument_size, 1));
+        *answer = 0;
+        if (system->saves == NULL || name == NULL || name[0] == 0) {
+            cs2_log("%s asked to write %s and this game has nowhere to put it",
+                    cs2_kcs_name(script), name == NULL ? "a file" : name);
+            return CS2_KCS_DONE_VALUE;
+        }
+        int slot = cs2_saves_slot_of(name);
+        if (slot >= 0) {
+            *answer = save_now(system, slot) == 0;
+            return CS2_KCS_DONE_VALUE;
+        }
+        if (cs2_saves_write_named(system->saves, name, &system->read) != 0) {
+            cs2_log("%s", cs2_error());
+            return CS2_KCS_DONE_VALUE;
+        }
+        cs2_log("%s written: %zu scenarios read", name, system->read.mark_count);
+        *answer = 1;
+        return CS2_KCS_DONE_VALUE;
+    }
+
     case 318: {
         float from = argf(arguments, argument_size, 0);
         float to = argf(arguments, argument_size, 1);

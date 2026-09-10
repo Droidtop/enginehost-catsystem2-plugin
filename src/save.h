@@ -24,8 +24,12 @@
  *
  * WHAT IS IN A SAVE. The reading position (the scenario and how far into it),
  * the game's numbered flags and strings - the bank a script reads with 210 and
- * writes with 211, which is where every story flag in these games lives - and
- * the read-text high-water marks 328 and 329 keep. That is what the game's own
+ * writes with 211, which is where every story flag in these games lives - the
+ * read-text high-water marks 328 and 329 keep, and the system script's own
+ * globals as one block, which is what makes the game come back READING rather
+ * than merely holding the right scenario. Not one word of that block is named
+ * here: which of them is the reading machine's mode is a fact about the game's
+ * own compiled script, so it is carried whole. That is what the game's own
  * screens ask for and what its own load path needs; it is not the original
  * engine's file format, which nothing but the original reads, so the file says
  * plainly what it is in its first bytes and an original save is not mistaken
@@ -62,6 +66,9 @@ typedef struct {
     char scenario[192];          /* the scene script being read */
     uint32_t cursor;             /* how far into it */
     int64_t when;                /* when it was written, in seconds */
+    char script[96];             /* the system script the globals belong to */
+    uint8_t *globals;            /* and its globals, as they stood */
+    size_t globals_size;
     cs2_save_flag *flags;
     size_t flag_count;
     cs2_save_string *strings;
@@ -77,6 +84,9 @@ int cs2_save_flag_value(const cs2_save *save, uint32_t key, int32_t *value);
 void cs2_save_set_string(cs2_save *save, uint32_t key, const char *text);
 const char *cs2_save_string_value(const cs2_save *save, uint32_t key);
 void cs2_save_set_mark(cs2_save *save, const char *name, int32_t mark);
+/* Takes a copy of the block; 0 on success. */
+int cs2_save_set_globals(cs2_save *save, const char *script,
+                         const void *globals, size_t size);
 int32_t cs2_save_mark_value(const cs2_save *save, const char *name);
 
 /* The store: the folder, and the slots in it. */
@@ -99,6 +109,23 @@ int cs2_saves_newest(const cs2_saves *saves, int from, int to);
 /* 0 on success. cs2_saves_read fills `into`, which the caller clears. */
 int cs2_saves_read(const cs2_saves *saves, int slot, cs2_save *into);
 int cs2_saves_write(const cs2_saves *saves, int slot, const cs2_save *from);
+
+/*
+ * The same by file name rather than by slot, because the system script names
+ * the file itself: engine function 245 is handed "save0160.dat" for a quick
+ * save and "savegen.dat" for the game's own record of what has been read and
+ * seen, which belongs to the player and not to any one save. A name is one
+ * plain file name in the save folder and nothing else.
+ */
+int cs2_saves_read_named(const cs2_saves *saves, const char *name, cs2_save *into);
+int cs2_saves_write_named(const cs2_saves *saves, const char *name, const cs2_save *from);
+
+/*
+ * The slot a file name is for, or -1 when the name is not one of the numbered
+ * saves - which is how "savegen.dat" is told from "save0160.dat" without any
+ * knowledge of a particular game.
+ */
+int cs2_saves_slot_of(const char *name);
 int cs2_saves_delete(const cs2_saves *saves, int slot);
 int cs2_saves_exchange(const cs2_saves *saves, int a, int b);
 int cs2_saves_copy(const cs2_saves *saves, int from, int to);

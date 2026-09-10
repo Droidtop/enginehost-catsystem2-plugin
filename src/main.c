@@ -43,6 +43,8 @@ static void usage(void) {
         "                    does; may be given more than once\n"
         "  --press <n>:<key> press up, down, left, right, confirm or cancel on frame n;\n"
         "                    may be given more than once\n"
+        "  --saves <folder>  where the game's own saves are kept (default ./saves).\n"
+        "                    Never the game folder: that is the player's\n"
         "  --shot <file>     draw one frame into a PNG and exit, opening no window\n"
         "  --dump-scene      print the scenario the way the system script reads it:\n"
         "                    every line, its words and what kind each word is\n"
@@ -203,6 +205,7 @@ int main(int argc, char **argv) {
     const char *list = NULL;
     const char *images = NULL;
     const char *kcs_script = NULL;
+    const char *saves = "saves";
     int kcs_frames = 0;
     int boot_type = -20;
     int boot_given = 0;
@@ -229,6 +232,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
         else if (strcmp(argv[i], "--dump-scene") == 0) dump_scene = 1;
         else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--saves") == 0 && i + 1 < argc) saves = argv[++i];
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
         else if (strcmp(argv[i], "--list") == 0 && i + 1 < argc) list = argv[++i];
         else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) images = argv[++i];
@@ -359,6 +363,7 @@ int main(int argc, char **argv) {
                 cs2_system_set_audio(system, audio);
             }
         }
+        cs2_system_set_save_folder(system, saves);
         /* The game's own layout sets the boot type; --boot overrides it. */
         if (boot_given) cs2_system_set_boot(system, boot_type, boot_scene);
         uint32_t variable_size = 0;

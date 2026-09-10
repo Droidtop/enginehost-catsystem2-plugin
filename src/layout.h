@@ -54,6 +54,37 @@ typedef struct {
     const char *(*string)(void *context, int number);
     void (*run_script)(void *context, const char *name);
     void (*stop_script)(void *context);
+    /*
+     * `send <class> <word> <code>`: an event from a screen to whatever script
+     * is waiting for one. This is the whole of the message window's system
+     * row - "#_SYS_QSAVE / send 0xffff0003 0 21" - and of every other place a
+     * layout has to tell the system script that the reader has asked for
+     * something. It is the same channel a click arrives on.
+     */
+    void (*post)(void *context, uint32_t class_, uint32_t word, uint32_t code);
+
+    /*
+     * The game's own saves. _saveload.fes is the save and load screen and it
+     * is written entirely in questions to the engine: is there a save in this
+     * slot, which is the newest of these slots, write one, delete one, and
+     * what title and message does one carry. A panel binds itself to a slot
+     * with `setsave` and reads a flag back out of it with `getflag`, which is
+     * how the load path recovers the scenario before it jumps.
+     *
+     * Loading is not here: the screen writes the slot into flag 512 and exits,
+     * and the system script boots on that number.
+     */
+    int (*save_exists)(void *context, int slot);
+    int (*save_newest)(void *context, int from, int to);
+    int (*save_write)(void *context, int slot);
+    int (*save_delete)(void *context, int slot);
+    int (*save_exchange)(void *context, int a, int b);
+    int (*save_copy)(void *context, int from, int to);
+    /* A flag out of a slot, without loading it. 0 when the save has no such flag. */
+    int (*save_flag)(void *context, int slot, int number, int32_t *value);
+    /* What a save is called: 0x200 the player's message, 0x80000000 the scene title. */
+    const char *(*save_string)(void *context, int slot, uint32_t what);
+    void (*save_set_string)(void *context, int slot, uint32_t what, const char *text);
 } cs2_layout_host;
 
 /* Loads "fes.int/<name>.fes" and puts it on its first section, #START. */

@@ -22,6 +22,7 @@
 #include "kcs.h"
 #include "layout.h"
 #include "plane.h"
+#include "save.h"
 #include "scene.h"
 
 typedef struct cs2_system cs2_system;
@@ -69,6 +70,15 @@ const cs2_scene *cs2_system_scenario(const cs2_system *system);
  * need one begin on. adv.xml names the numbers both are kept under.
  */
 void cs2_system_set_boot(cs2_system *system, int type, const char *scenario);
+
+/*
+ * Where the game's own saves are kept. Never the game folder: that is the
+ * player's and on the console it is a read-only card, so whoever runs this
+ * engine says where saves go - the Android wrapper passes Enginehost's own
+ * per-game save folder, the desktop runner takes --saves. A game given no
+ * folder plays and simply cannot save.
+ */
+void cs2_system_set_save_folder(cs2_system *system, const char *folder);
 
 /* The sound device the scenario plays through, or NULL for a game with none. */
 void cs2_system_set_audio(cs2_system *system, cs2_audio *audio);

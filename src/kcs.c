@@ -217,6 +217,22 @@ uint32_t cs2_kcs_suspend_address(const cs2_kcs *script) { return script->suspend
 
 uint64_t cs2_kcs_instructions(const cs2_kcs *script) { return script->instructions; }
 uint32_t cs2_kcs_pc(const cs2_kcs *script) { return script->pc; }
+
+const void *cs2_kcs_globals(const cs2_kcs *script, uint32_t *size) {
+    if (size != NULL) *size = script == NULL ? 0 : script->globals_size;
+    return script == NULL ? NULL : script->memory;
+}
+
+int cs2_kcs_set_globals(cs2_kcs *script, const void *globals, uint32_t size) {
+    if (script == NULL || globals == NULL || size != script->globals_size) {
+        cs2_set_error("this save holds %u bytes of script state and %s wants %u",
+                      (unsigned) size, script == NULL ? "the script" : script->name,
+                      (unsigned) (script == NULL ? 0 : script->globals_size));
+        return -1;
+    }
+    memcpy(script->memory, globals, size);
+    return 0;
+}
 uint32_t cs2_kcs_base(const cs2_kcs *script) { return script->base; }
 const char *cs2_kcs_name(const cs2_kcs *script) { return script->name; }
 

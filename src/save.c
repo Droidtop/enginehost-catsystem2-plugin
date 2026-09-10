@@ -22,6 +22,7 @@
 #define TAG_FLAG  0x47414c46u   /* "FLAG" the numbered flags */
 #define TAG_STRS  0x53525453u   /* "STRS" the numbered strings */
 #define TAG_READ  0x44414552u   /* "READ" the read-text high-water marks */
+#define TAG_SCPT  0x54504353u   /* "SCPT" the system script's own globals */
 
 #define SLOT_LIMIT 4096         /* pages 0..21 of eight is 176; this is generous */
 #define SAVE_BYTES (4u * 1024u * 1024u)
@@ -30,10 +31,14 @@ struct cs2_saves {
     char folder[512];
 };
 
+static int write_to(const char *path, const cs2_save *from);
+static int read_from(const char *path, cs2_save *into);
+
 /* ------------------------------------------------------------- one save */
 
 void cs2_save_clear(cs2_save *save) {
     if (save == NULL) return;
+    free(save->globals);
     free(save->flags);
     for (size_t i = 0; i < save->string_count; i++) free(save->strings[i].text);
     free(save->strings);
@@ -110,6 +115,19 @@ void cs2_save_set_mark(cs2_save *save, const char *name, int32_t mark) {
              sizeof save->marks[save->mark_count].name, "%s", name);
     save->marks[save->mark_count].mark = mark;
     save->mark_count++;
+}
+
+int cs2_save_set_globals(cs2_save *save, const char *script,
+                         const void *globals, size_t size) {
+    if (size == 0 || globals == NULL) return -1;
+    uint8_t *kept = malloc(size);
+    if (kept == NULL) return -1;
+    memcpy(kept, globals, size);
+    free(save->globals);
+    save->globals = kept;
+    save->globals_size = size;
+    snprintf(save->script, sizeof save->script, "%s", script == NULL ? "" : script);
+    return 0;
 }
 
 int32_t cs2_save_mark_value(const cs2_save *save, const char *name) {
@@ -253,11 +271,32 @@ const char *cs2_saves_folder(const cs2_saves *saves) {
     return saves == NULL ? NULL : saves->folder;
 }
 
+/* One plain file name in the save folder: no separators, nothing above it. */
+static int named_path(const cs2_saves *saves, const char *name,
+                      char *into, size_t into_size) {
+    if (saves == NULL || name == NULL || name[0] == 0 || strcmp(name, ".") == 0
+        || strcmp(name, "..") == 0 || strpbrk(name, "/\\") != NULL) {
+        return -1;
+    }
+    snprintf(into, into_size, "%s/%s", saves->folder, name);
+    return 0;
+}
+
 /* The original's own name for a slot's file, so a folder reads the same way. */
 static int path_of(const cs2_saves *saves, int slot, char *into, size_t into_size) {
     if (saves == NULL || slot < 0 || slot >= SLOT_LIMIT) return -1;
     snprintf(into, into_size, "%s/save%04d.dat", saves->folder, slot);
     return 0;
+}
+
+int cs2_saves_slot_of(const char *name) {
+    if (name == NULL || strncmp(name, "save", 4) != 0) return -1;
+    const char *digits = name + 4;
+    if (*digits < '0' || *digits > '9') return -1;
+    char *past = NULL;
+    long slot = strtol(digits, &past, 10);
+    if (past == digits || strcmp(past, ".dat") != 0) return -1;
+    return slot < 0 || slot >= SLOT_LIMIT ? -1 : (int) slot;
 }
 
 int cs2_saves_exists(const cs2_saves *saves, int slot) {
@@ -303,8 +342,25 @@ int cs2_saves_newest(const cs2_saves *saves, int from, int to) {
 
 int cs2_saves_write(const cs2_saves *saves, int slot, const cs2_save *from) {
     char path[600];
-    if (path_of(saves, slot, path, sizeof path) != 0 || from == NULL) {
+    if (path_of(saves, slot, path, sizeof path) != 0) {
         cs2_set_error("slot %d is not a save this game has", slot);
+        return -1;
+    }
+    return write_to(path, from);
+}
+
+int cs2_saves_write_named(const cs2_saves *saves, const char *name, const cs2_save *from) {
+    char path[600];
+    if (named_path(saves, name, path, sizeof path) != 0) {
+        cs2_set_error("%s is not a name a save can have", name == NULL ? "" : name);
+        return -1;
+    }
+    return write_to(path, from);
+}
+
+static int write_to(const char *path, const cs2_save *from) {
+    if (from == NULL) {
+        cs2_set_error("there is nothing to write to %s", path);
         return -1;
     }
 
@@ -339,12 +395,20 @@ int cs2_saves_write(const cs2_saves *saves, int slot, const cs2_save *from) {
         put32(&body, (uint32_t) from->marks[i].mark);
     }
     put_chunk(&out, TAG_READ, &body);
+    body.size = 0;
+
+    if (from->globals != NULL && from->globals_size > 0) {
+        put_text(&body, from->script);
+        put32(&body, (uint32_t) from->globals_size);
+        put(&body, from->globals, from->globals_size);
+        put_chunk(&out, TAG_SCPT, &body);
+    }
 
     int failed = out.failed || body.failed;
     free(body.data);
     if (failed) {
         free(out.data);
-        cs2_set_error("out of memory writing save %d", slot);
+        cs2_set_error("out of memory writing %s", path);
         return -1;
     }
 
@@ -358,7 +422,7 @@ int cs2_saves_write(const cs2_saves *saves, int slot, const cs2_save *from) {
     FILE *file = fopen(temporary, "wb");
     if (file == NULL) {
         free(out.data);
-        cs2_set_error("save %d cannot be written to %s", slot, saves->folder);
+        cs2_set_error("%s cannot be written", path);
         return -1;
     }
     size_t written = fwrite(out.data, 1, out.size, file);
@@ -366,13 +430,13 @@ int cs2_saves_write(const cs2_saves *saves, int slot, const cs2_save *from) {
     free(out.data);
     if (written != out.size || closed != 0) {
         remove(temporary);
-        cs2_set_error("save %d was not written whole", slot);
+        cs2_set_error("%s was not written whole", path);
         return -1;
     }
     remove(path);
     if (rename(temporary, path) != 0) {
         remove(temporary);
-        cs2_set_error("save %d cannot be put in place", slot);
+        cs2_set_error("%s cannot be put in place", path);
         return -1;
     }
     return 0;
@@ -380,8 +444,25 @@ int cs2_saves_write(const cs2_saves *saves, int slot, const cs2_save *from) {
 
 int cs2_saves_read(const cs2_saves *saves, int slot, cs2_save *into) {
     char path[600];
-    if (path_of(saves, slot, path, sizeof path) != 0 || into == NULL) {
+    if (path_of(saves, slot, path, sizeof path) != 0) {
         cs2_set_error("slot %d is not a save this game has", slot);
+        return -1;
+    }
+    return read_from(path, into);
+}
+
+int cs2_saves_read_named(const cs2_saves *saves, const char *name, cs2_save *into) {
+    char path[600];
+    if (named_path(saves, name, path, sizeof path) != 0) {
+        cs2_set_error("%s is not a name a save can have", name == NULL ? "" : name);
+        return -1;
+    }
+    return read_from(path, into);
+}
+
+static int read_from(const char *path, cs2_save *into) {
+    if (into == NULL) {
+        cs2_set_error("there is nowhere to read %s into", path);
         return -1;
     }
     cs2_bytes file = { 0 };
@@ -418,6 +499,12 @@ int cs2_saves_read(const cs2_saves *saves, int slot, cs2_save *into) {
                 take_text(&in, text, sizeof text);
                 if (!in.failed) cs2_save_set_string(into, key, text);
             }
+        } else if (tag == TAG_SCPT) {
+            take_text(&in, into->script, sizeof into->script);
+            uint32_t bytes = take32(&in);
+            if (!in.failed && bytes <= in.size - in.at) {
+                cs2_save_set_globals(into, into->script, in.data + in.at, bytes);
+            }
         } else if (tag == TAG_READ) {
             uint32_t count = take32(&in);
             for (uint32_t i = 0; i < count && !in.failed; i++) {
@@ -432,7 +519,7 @@ int cs2_saves_read(const cs2_saves *saves, int slot, cs2_save *into) {
     cs2_bytes_free(&file);
     if (in.failed) {
         cs2_save_clear(into);
-        cs2_set_error("save %d stops in the middle of itself", slot);
+        cs2_set_error("%s stops in the middle of itself", path);
         return -1;
     }
     return 0;
