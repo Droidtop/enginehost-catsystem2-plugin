@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "frametime.h"
+
 #define MAX_ARCHIVES 64
 #define MAX_LOOSE (256u * 1024 * 1024)
 
@@ -124,7 +126,7 @@ static void strip_extension(char *name) {
     if (dot != NULL && dot != name) *dot = '\0';
 }
 
-int cs2_files_read(cs2_files *files, const char *path, cs2_bytes *out) {
+static int read_the_file(cs2_files *files, const char *path, cs2_bytes *out) {
     out->data = NULL;
     out->size = 0;
 
@@ -175,4 +177,16 @@ int cs2_files_read(cs2_files *files, const char *path, cs2_bytes *out) {
     }
     cs2_set_error("this game has no %s", path);
     return -1;
+}
+
+/*
+ * Reading an entry out of an archive means deciphering it and inflating it, and
+ * a frame that reads the same entry a dozen times is paying that over and over.
+ * That is exactly what the frame-time line is for, so every read is counted.
+ */
+int cs2_files_read(cs2_files *files, const char *path, cs2_bytes *out) {
+    uint64_t began = cs2_now();
+    int got = read_the_file(files, path, out);
+    cs2_span_add(CS2_SPAN_READ, began);
+    return got;
 }

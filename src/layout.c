@@ -88,6 +88,7 @@ struct object_state {
 
 struct cs2_layout {
     cs2_files *files;
+    cs2_pictures *pictures;
     cs2_fes *fes;
     cs2_layout_host host;
     object_state *objects;
@@ -102,7 +103,6 @@ struct cs2_layout {
     int result;
     cs2_layout *child;
     char state[64];
-    char missing[64];        /* the last image this copy of the game has not got */
 
     /*
      * The reader. A click is kept as the clicked object's identity, which is
@@ -815,7 +815,8 @@ static void run_lines(cs2_layout *layout, int one_frame) {
             char name[48] = "";
             sscanf(line, "%*s %47s", name);
             cs2_layout_free(layout->child);
-            layout->child = cs2_layout_start(layout->files, name, &layout->host);
+            layout->child = cs2_layout_start(layout->files, layout->pictures, name,
+                                             &layout->host);
             if (layout->child == NULL) cs2_log("%s", cs2_error());
             layout->line++;
             continue;
@@ -1047,13 +1048,15 @@ int32_t cs2_layout_local(const cs2_layout *layout, int number) {
 
 /* --------------------------------------------------------------- the layout */
 
-cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layout_host *host) {
+cs2_layout *cs2_layout_start(cs2_files *files, cs2_pictures *pictures, const char *name,
+                             const cs2_layout_host *host) {
     cs2_layout *layout = calloc(1, sizeof *layout);
     if (layout == NULL) {
         cs2_set_error("out of memory for a layout");
         return NULL;
     }
     layout->files = files;
+    layout->pictures = pictures;
     layout->host = *host;
     layout->result = -1;
     layout->focus = -1;
@@ -1279,32 +1282,22 @@ static void draw_one(cs2_layout *layout, const object_state *object,
     if (plane != NULL) alpha = alpha * plane->alpha / 255;
     if (alpha <= 0) return;
 
-    char path[160];
-    snprintf(path, sizeof path, "image.int/%s.hg3", object->declared.file);
-    cs2_bytes file = {0};
-    if (cs2_files_read(layout->files, path, &file) != 0) {
-        if (strcmp(layout->missing, object->declared.file) != 0) {
-            snprintf(layout->missing, sizeof layout->missing, "%s", object->declared.file);
-            cs2_log("%s.fes wants %s, which is not in this copy of the game",
-                    cs2_fes_name(layout->fes), path);
-        }
-        return;
-    }
-    cs2_hg3_frame image = {0};
-    if (cs2_hg3_decode_id(file.data, file.size, id, &image) != 0) {
-        cs2_log("%s: %s", path, cs2_error());
-        cs2_bytes_free(&file);
-        return;
-    }
-    int x = object->declared.x + image.offset_x;
-    int y = object->declared.y + image.offset_y;
+    /*
+     * One picture out of the run's own store of decoded ones. Until that store
+     * existed this read the whole archive entry and decoded the frame again for
+     * every piece of every screen, every frame - the title screen alone did it
+     * four times a frame - which is the greater part of why the console called
+     * the game incredibly slow.
+     */
+    const cs2_hg3_frame *image = cs2_pictures_id(layout->pictures, object->declared.file, id);
+    if (image == NULL) return;
+    int x = object->declared.x + image->offset_x;
+    int y = object->declared.y + image->offset_y;
     if (plane != NULL) {
         x += plane->declared.x + plane->declared.base_x;
         y += plane->declared.y + plane->declared.base_y;
     }
-    blend(canvas, width, height, x, y, &image, alpha);
-    cs2_hg3_frame_free(&image);
-    cs2_bytes_free(&file);
+    blend(canvas, width, height, x, y, image, alpha);
 }
 
 void cs2_layout_draw(cs2_layout *layout, uint32_t *canvas, int width, int height) {
@@ -1415,38 +1408,31 @@ static void ensure_boxes(cs2_layout *layout) {
         resolve_the_box(layout, &layout->objects[i]);
     }
     for (size_t i = 0; i < layout->object_count; i++) {
-        if (layout->objects[i].boxes_read) continue;
-        char name[64];
-        snprintf(name, sizeof name, "%s", layout->objects[i].declared.file);
-        if (name[0] == 0) {
-            layout->objects[i].boxes_read = 1;
+        object_state *object = &layout->objects[i];
+        if (object->boxes_read) continue;
+        if (object->declared.file[0] == 0) {
+            object->boxes_read = 1;
             continue;
         }
-        char path[160];
-        snprintf(path, sizeof path, "image.int/%s.hg3", name);
-        cs2_bytes file = {0};
-        int opened = cs2_files_read(layout->files, path, &file) == 0;
-        /* One read of the file answers for every object drawn out of it. */
-        for (size_t j = i; j < layout->object_count; j++) {
-            object_state *object = &layout->objects[j];
-            if (object->boxes_read || strcmp(object->declared.file, name) != 0) continue;
-            object->boxes_read = 1;
-            if (!opened) continue;
-            for (int k = 0; k < CS2_FES_IDS; k++) {
-                if (object->declared.ids[k] < 0) continue;
-                cs2_hg3_frame frame = {0};
-                if (cs2_hg3_bounds_id(file.data, file.size,
-                                      object->declared.ids[k], &frame) != 0) {
-                    continue;
-                }
-                object->boxes[k].known = 1;
-                object->boxes[k].offset_x = frame.offset_x;
-                object->boxes[k].offset_y = frame.offset_y;
-                object->boxes[k].width = frame.width;
-                object->boxes[k].height = frame.height;
-            }
+        /*
+         * A picture this copy of the game has not got is left unread rather
+         * than answered: a layout can name a picture through one of the game's
+         * own numbered strings, and that string may be set a frame later.
+         */
+        if (!cs2_pictures_has(layout->pictures, object->declared.file)) continue;
+        object->boxes_read = 1;
+        for (int k = 0; k < CS2_FES_IDS; k++) {
+            if (object->declared.ids[k] < 0) continue;
+            const cs2_hg3_frame *frame = cs2_pictures_id(layout->pictures,
+                                                         object->declared.file,
+                                                         object->declared.ids[k]);
+            if (frame == NULL) continue;
+            object->boxes[k].known = 1;
+            object->boxes[k].offset_x = frame->offset_x;
+            object->boxes[k].offset_y = frame->offset_y;
+            object->boxes[k].width = frame->width;
+            object->boxes[k].height = frame->height;
         }
-        if (opened) cs2_bytes_free(&file);
     }
 }
 

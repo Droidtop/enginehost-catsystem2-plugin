@@ -20,6 +20,7 @@
 #include <time.h>
 
 #include "cs2.h"
+#include "frametime.h"
 #include "hg3.h"
 #include "layout.h"
 #include "scene.h"
@@ -77,6 +78,7 @@ typedef struct {
 
 struct cs2_system {
     cs2_files *files;
+    cs2_pictures *pictures;
     cs2_audio *audio;            /* the mixer 936 plays through, or NULL */
     /*
      * The voices the script is holding. The game's own engine answers 936
@@ -246,13 +248,14 @@ static int32_t scene_kind(cs2_system *system, int32_t line, int32_t index) {
     return (int32_t) type;
 }
 
-cs2_system *cs2_system_new(cs2_files *files, int width, int height) {
+cs2_system *cs2_system_new(cs2_files *files, cs2_pictures *pictures, int width, int height) {
     cs2_system *system = calloc(1, sizeof *system);
     if (system == NULL) {
         cs2_set_error("out of memory for the engine's system functions");
         return NULL;
     }
     system->files = files;
+    system->pictures = pictures;
     system->width = width;
     system->height = height;
     system->planes = cs2_planes_new(width, height);
@@ -1014,7 +1017,8 @@ static void start_the_layout(cs2_system *system, cs2_plane_state *plane) {
         .save_string = host_save_string,
         .save_set_string = host_save_set_string,
     };
-    cs2_layout *started = cs2_layout_start(system->files, plane->layout, &host);
+    cs2_layout *started = cs2_layout_start(system->files, system->pictures,
+                                           plane->layout, &host);
     if (started == NULL) {
         cs2_log("%s", cs2_error());
         return;
@@ -1097,6 +1101,7 @@ void cs2_system_frame(cs2_system *system) {
      * something it starts part way through. A layout that has finished leaves
      * its answer on the plane, which is what 452 reads back.
      */
+    uint64_t began = cs2_now();
     for (size_t i = 0; i < system->layout_count; i++) {
         cs2_layout_frame(system->layouts[i].layout);
         cs2_plane_state *plane = cs2_plane_get(system->planes, system->layouts[i].plane);
@@ -1106,6 +1111,7 @@ void cs2_system_frame(cs2_system *system) {
             plane->result = result;
         }
     }
+    cs2_span_add(CS2_SPAN_LAYOUT, began);
     if (system->flow == NULL) return;
     int running = cs2_kcs_frame(system->flow, 2000000);
     if (running < 0) {

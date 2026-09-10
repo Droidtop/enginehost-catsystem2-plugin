@@ -8,27 +8,17 @@
 #include "hg3.h"
 #include "png.h"
 
-#define CACHE_SIZE 12
-
-typedef struct {
-    char name[128];
-    cs2_hg3_frame frame;
-    int used;
-    unsigned long age;
-} cached;
-
 struct cs2_render {
     cs2_files *files;
+    cs2_pictures *pictures;
     int width;
     int height;
     uint32_t *canvas;
-    cached cache[CACHE_SIZE];
-    unsigned long clock;
     cs2_font *font;
     cs2_font *small_font;
 };
 
-cs2_render *cs2_render_new(cs2_files *files, int width, int height) {
+cs2_render *cs2_render_new(cs2_files *files, cs2_pictures *pictures, int width, int height) {
     if (width <= 0 || height <= 0 || width > 8192 || height > 8192) {
         cs2_set_error("cannot draw a %dx%d screen", width, height);
         return NULL;
@@ -39,6 +29,7 @@ cs2_render *cs2_render_new(cs2_files *files, int width, int height) {
         return NULL;
     }
     render->files = files;
+    render->pictures = pictures;
     render->width = width;
     render->height = height;
     render->canvas = calloc((size_t) width * height, sizeof *render->canvas);
@@ -58,7 +49,6 @@ cs2_render *cs2_render_new(cs2_files *files, int width, int height) {
 
 void cs2_render_free(cs2_render *render) {
     if (render == NULL) return;
-    for (int i = 0; i < CACHE_SIZE; i++) cs2_hg3_frame_free(&render->cache[i].frame);
     cs2_font_free(render->font);
     cs2_font_free(render->small_font);
     free(render->canvas);
@@ -93,46 +83,6 @@ static void fill(cs2_render *render, int x, int y, int width, int height, uint32
                   colour | 0xff000000u, alpha);
         }
     }
-}
-
-static const cs2_hg3_frame *image(cs2_render *render, const char *name) {
-    for (int i = 0; i < CACHE_SIZE; i++) {
-        if (render->cache[i].used && strcmp(render->cache[i].name, name) == 0) {
-            render->cache[i].age = ++render->clock;
-            return &render->cache[i].frame;
-        }
-    }
-    char path[256];
-    snprintf(path, sizeof path, "image.int/%s.hg3", name);
-    cs2_bytes data;
-    if (cs2_files_read(render->files, path, &data) != 0) {
-        snprintf(path, sizeof path, "%s.hg3", name);
-        if (cs2_files_read(render->files, path, &data) != 0) {
-            cs2_log("no image named %s", name);
-            return NULL;
-        }
-    }
-    cs2_hg3_frame frame;
-    int decoded = cs2_hg3_decode(data.data, data.size, 0, &frame);
-    cs2_bytes_free(&data);
-    if (decoded != 0) {
-        cs2_log("could not decode %s: %s", name, cs2_error());
-        return NULL;
-    }
-    int oldest = 0;
-    for (int i = 0; i < CACHE_SIZE; i++) {
-        if (!render->cache[i].used) {
-            oldest = i;
-            break;
-        }
-        if (render->cache[i].age < render->cache[oldest].age) oldest = i;
-    }
-    cs2_hg3_frame_free(&render->cache[oldest].frame);
-    snprintf(render->cache[oldest].name, sizeof render->cache[oldest].name, "%s", name);
-    render->cache[oldest].frame = frame;
-    render->cache[oldest].used = 1;
-    render->cache[oldest].age = ++render->clock;
-    return &render->cache[oldest].frame;
 }
 
 static void draw_image(cs2_render *render, const cs2_hg3_frame *frame, int x, int y, int alpha) {
@@ -192,10 +142,10 @@ const uint32_t *cs2_render_frame(cs2_render *render, const cs2_scene *scene, con
                  layer->height > 0 ? layer->height : render->height, layer->colour);
             continue;
         }
-        const cs2_hg3_frame *frame = image(render, layer->image);
+        const cs2_hg3_frame *frame = cs2_pictures_index(render->pictures, layer->image, 0);
         if (frame != NULL) draw_image(render, frame, layer->x, layer->y, layer->alpha);
         for (int part = 0; part < layer->part_count; part++) {
-            const cs2_hg3_frame *over = image(render, layer->parts[part]);
+            const cs2_hg3_frame *over = cs2_pictures_index(render->pictures, layer->parts[part], 0);
             if (over != NULL) draw_image(render, over, layer->x, layer->y, layer->alpha);
         }
     }
@@ -226,9 +176,12 @@ const uint32_t *cs2_render_frame(cs2_render *render, const cs2_scene *scene, con
  * which is to lay them over one another and look.
  */
 int cs2_draw_images(cs2_files *files, const char *names, const char *path) {
-    cs2_render *render = cs2_render_new(files, 1024, 768);
+    cs2_pictures *pictures = cs2_pictures_new(files, 0);
+    cs2_render *render = pictures == NULL ? NULL
+                       : cs2_render_new(files, pictures, 1024, 768);
     if (render == NULL) {
         fprintf(stderr, "%s\n", cs2_error());
+        cs2_pictures_free(pictures);
         return 1;
     }
     for (size_t i = 0; i < (size_t) render->width * render->height; i++) {
@@ -238,7 +191,7 @@ int cs2_draw_images(cs2_files *files, const char *names, const char *path) {
     snprintf(list, sizeof list, "%s", names);
     int drawn = 0;
     for (char *name = strtok(list, ","); name != NULL; name = strtok(NULL, ",")) {
-        const cs2_hg3_frame *frame = image(render, name);
+        const cs2_hg3_frame *frame = cs2_pictures_index(pictures, name, 0);
         if (frame == NULL) continue;
         cs2_log("%s: %dx%d at %d,%d of %dx%d, base %d,%d", name, frame->width, frame->height,
                 frame->offset_x, frame->offset_y, frame->total_width, frame->total_height,
@@ -249,5 +202,6 @@ int cs2_draw_images(cs2_files *files, const char *names, const char *path) {
     int result = drawn == 0 ? 1 : cs2_png_write(path, render->canvas, render->width, render->height);
     if (result != 0) fprintf(stderr, "%s\n", cs2_error());
     cs2_render_free(render);
+    cs2_pictures_free(pictures);
     return result;
 }

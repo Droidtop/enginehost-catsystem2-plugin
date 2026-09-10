@@ -21,13 +21,14 @@
 #include "files.h"
 #include "kcs.h"
 #include "layout.h"
+#include "pictures.h"
 #include "plane.h"
 #include "save.h"
 #include "scene.h"
 
 typedef struct cs2_system cs2_system;
 
-cs2_system *cs2_system_new(cs2_files *files, int width, int height);
+cs2_system *cs2_system_new(cs2_files *files, cs2_pictures *pictures, int width, int height);
 void cs2_system_free(cs2_system *system);
 
 /* Hands the script to the engine: cs2_kcs_set_gcall(script, cs2_system_gcall, system). */

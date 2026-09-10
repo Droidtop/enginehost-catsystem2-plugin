@@ -25,6 +25,7 @@
 #include <stdint.h>
 
 #include "fes.h"
+#include "pictures.h"
 
 typedef struct cs2_layout cs2_layout;
 
@@ -88,7 +89,8 @@ typedef struct {
 } cs2_layout_host;
 
 /* Loads "fes.int/<name>.fes" and puts it on its first section, #START. */
-cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layout_host *host);
+cs2_layout *cs2_layout_start(cs2_files *files, cs2_pictures *pictures, const char *name,
+                             const cs2_layout_host *host);
 void cs2_layout_free(cs2_layout *layout);
 
 const char *cs2_layout_name(const cs2_layout *layout);

@@ -3,8 +3,9 @@
  *
  * The game is authored for a fixed virtual screen - 1024x576 for Labyrinth of
  * Grisaia - so everything is composed at that size and whoever shows it scales
- * it. Images are decoded when a layer first asks for one and the last few are
- * kept, because one image bank is 2.8 GB and nothing is ever unpacked.
+ * it. The pictures come out of the run's own store of decoded ones, which is
+ * shared with the front end's layouts: a screen is the same few pictures over
+ * and over and decoding one twice is the whole of what made this slow.
  *
  * Text is drawn with the game's own font, which retail releases ship beside
  * their archives: the English ones map punctuation through it, so the text is
@@ -13,12 +14,14 @@
 #ifndef CS2_RENDER_H
 #define CS2_RENDER_H
 
+#include "pictures.h"
 #include "scene.h"
 
 typedef struct cs2_render cs2_render;
 
-/* The files must outlive the renderer. Works with no font, drawing no text. */
-cs2_render *cs2_render_new(cs2_files *files, int width, int height);
+/* The files and the pictures must outlive the renderer. Works with no font,
+   drawing no text. */
+cs2_render *cs2_render_new(cs2_files *files, cs2_pictures *pictures, int width, int height);
 void cs2_render_free(cs2_render *render);
 
 int cs2_render_width(const cs2_render *render);

@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "frametime.h"
+
 #define MAX_PIXELS (64u << 20)
 
 /* The command stream, read as bits from the low end of each byte. */
@@ -232,7 +234,7 @@ int cs2_hg3_frame_count(const uint8_t *file, size_t size) {
  * the frame's size and offset and is all a hit test needs; the packed image is
  * then left alone, so asking where a button is costs nothing.
  */
-static int decode_frame(const uint8_t *file, size_t size, size_t first_tag,
+static int decode_the_frame(const uint8_t *file, size_t size, size_t first_tag,
                         cs2_hg3_frame *out, int pixels_wanted) {
     int32_t std[10];
     int have_std = 0;
@@ -336,6 +338,21 @@ static int decode_frame(const uint8_t *file, size_t size, size_t first_tag,
     out->base_y = std[9];
     out->pixels = pixels;
     return 0;
+}
+
+/*
+ * Turning an HG-3 into pixels is the most expensive thing a frame can ask for,
+ * and asking for the same one twice is the fault the frame-time line was added
+ * to find, so the pixel-producing calls are the ones counted. Reading a frame
+ * for its size alone costs nothing worth measuring and is not counted.
+ */
+static int decode_frame(const uint8_t *file, size_t size, size_t first_tag,
+                        cs2_hg3_frame *out, int pixels_wanted) {
+    if (!pixels_wanted) return decode_the_frame(file, size, first_tag, out, 0);
+    uint64_t began = cs2_now();
+    int decoded = decode_the_frame(file, size, first_tag, out, 1);
+    cs2_span_add(CS2_SPAN_DECODE, began);
+    return decoded;
 }
 
 int cs2_hg3_decode(const uint8_t *file, size_t size, int frame_index, cs2_hg3_frame *out) {
