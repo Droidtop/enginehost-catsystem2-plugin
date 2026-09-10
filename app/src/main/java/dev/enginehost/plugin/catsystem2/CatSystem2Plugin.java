@@ -15,6 +15,7 @@ import android.view.View;
 import dev.enginehost.api.EngineControllerEvent;
 import dev.enginehost.api.EnginePlugin;
 import dev.enginehost.api.EnginePluginSession;
+import java.io.File;
 import java.io.IOException;
 
 /**
@@ -62,7 +63,15 @@ public final class CatSystem2Plugin implements EnginePlugin {
         if (!"catsystem2".equals(session.engine()) || !"cst".equals(session.engineContext())) {
             throw new IOException("Unsupported CatSystem2 context");
         }
-        engine = nativeOpen(session.gamePath(), session.execFile());
+        /*
+         * The game's own saves go in the folder the host keeps for this game.
+         * Never the game folder: that is the reader's, and on this console it is
+         * a card the plugin does not write to.
+         */
+        File saves = session.host().saveDirectory();
+        if (saves != null && !saves.isDirectory()) saves.mkdirs();
+        engine = nativeOpen(session.gamePath(), session.execFile(),
+                            saves == null ? null : saves.getAbsolutePath());
         if (engine == 0) throw new IOException(nativeError());
         view = new ScreenView();
         session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
@@ -159,9 +168,20 @@ public final class CatSystem2Plugin implements EnginePlugin {
         @Override public void doFrame(long frameTimeNanos) {
             if (!running || engine == 0) return;
             boolean alive = nativeStep(engine);
-            nativeFrame(engine, pixels);
-            frame.setPixels(pixels, 0, width, 0, 0, width, height);
-            invalidate();
+            /*
+             * The engine answers with the rows of the picture that are not
+             * already on the screen, as the first row and how many: a reader
+             * reading is watching one band of it change and most frames change
+             * nothing at all, and a frame that changed nothing is one the
+             * display is not asked to draw again.
+             */
+            int band = nativeFrame(engine, pixels);
+            if (band != 0) {
+                int top = band >>> 16;
+                int rows = band & 0xffff;
+                frame.setPixels(pixels, top * width, width, 0, top, width, rows);
+                invalidate();
+            }
             if (alive) Choreographer.getInstance().postFrameCallback(this);
             else running = false;
         }
@@ -270,14 +290,15 @@ public final class CatSystem2Plugin implements EnginePlugin {
         private int hatDown;
     }
 
-    private static native long nativeOpen(String gamePath, String script);
+    private static native long nativeOpen(String gamePath, String script, String saveFolder);
     private static native void nativeClose(long engine);
     private static native void nativeSetSounding(long engine, boolean sounding);
     private static native String nativeError();
     private static native int nativeWidth(long engine);
     private static native int nativeHeight(long engine);
     private static native boolean nativeStep(long engine);
-    private static native void nativeFrame(long engine, int[] pixels);
+    /** The rows of the picture that changed: the first row and how many, or 0. */
+    private static native int nativeFrame(long engine, int[] pixels);
     private static native void nativeTouch(long engine, int x, int y);
     private static native void nativePointer(long engine, int x, int y);
     private static native void nativeKey(long engine, int key);

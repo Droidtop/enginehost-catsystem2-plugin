@@ -25,7 +25,9 @@
 #include "audio.h"
 #include "cs2.h"
 #include "files.h"
+#include "frametime.h"
 #include "kcs.h"
+#include "pictures.h"
 #include "render.h"
 #include "scene.h"
 #include "startup.h"
@@ -45,10 +47,18 @@ typedef struct {
     cs2_startup *startup;
     cs2_system *system;
     cs2_kcs *boot;              /* the game's own boot script */
+    cs2_pictures *pictures;     /* every picture of the game, decoded once */
     cs2_render *render;
     cs2_audio *audio;
     AAudioStream *sound;
     uint32_t *canvas;
+    /*
+     * The frame the screen is already showing. A reader looking at a line of
+     * dialogue is looking at a picture that does not change, and handing Java
+     * two and a half megabytes of pixels it already has, sixty times a second,
+     * is work for nothing: what goes over is the rows that differ.
+     */
+    uint32_t *shown;
     int width, height;
     int running;                /* the boot script has not ended or faulted */
 } session;
@@ -133,9 +143,11 @@ static void close_session(session *state) {
     }
     cs2_render_free(state->render);
     cs2_system_free(state->system);
+    cs2_pictures_free(state->pictures);
     cs2_startup_free(state->startup);
     cs2_files_close(state->files);
     free(state->canvas);
+    free(state->shown);
     free(state);
 }
 
@@ -146,11 +158,14 @@ static int screen_size(const cs2_startup *startup, const char *key, int fallback
 
 JNIEXPORT jlong JNICALL
 Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
-        JNIEnv *env, jclass type, jstring game_path, jstring wanted_script) {
+        JNIEnv *env, jclass type, jstring game_path, jstring wanted_script,
+        jstring save_folder) {
     (void) type;
     const char *root = (*env)->GetStringUTFChars(env, game_path, NULL);
     const char *wanted = wanted_script == NULL
         ? NULL : (*env)->GetStringUTFChars(env, wanted_script, NULL);
+    const char *saves = save_folder == NULL
+        ? NULL : (*env)->GetStringUTFChars(env, save_folder, NULL);
 
     /*
      * Everything the engine says goes to logcat under this plugin's own tag.
@@ -201,13 +216,27 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
     state->width = screen_size(state->startup, "SCREEN/width", 1024);
     state->height = screen_size(state->startup, "SCREEN/height", 576);
     state->canvas = calloc((size_t) state->width * state->height, sizeof *state->canvas);
+    state->shown = calloc((size_t) state->width * state->height, sizeof *state->shown);
     state->boot = cs2_kcs_load(state->files, path);
-    state->system = cs2_system_new(state->files, state->width, state->height);
-    state->render = cs2_render_new(state->files, state->width, state->height);
-    if (state->canvas == NULL || state->boot == NULL || state->system == NULL
-        || state->render == NULL) {
+    state->pictures = cs2_pictures_new(state->files, 0);
+    state->system = cs2_system_new(state->files, state->pictures, state->width, state->height);
+    state->render = cs2_render_new(state->files, state->pictures, state->width, state->height);
+    if (state->canvas == NULL || state->shown == NULL || state->boot == NULL
+        || state->pictures == NULL || state->system == NULL || state->render == NULL) {
         goto failed;
     }
+    /*
+     * Where the game's own saves go. The game folder is the reader's and on this
+     * console it is a card that is not written to, so the host hands the plugin
+     * a folder of its own and the engine is told it. A game given none plays and
+     * simply cannot save.
+     */
+    if (saves != NULL && saves[0] != 0) cs2_system_set_save_folder(state->system, saves);
+    /*
+     * And the frame-time line, which is how the console answers "why is this
+     * slow": one line a second in logcat saying where the frame went.
+     */
+    cs2_frametime(1);
     uint32_t variable_size = 0;
     void *variables = cs2_system_variables(state->system, &variable_size);
     cs2_kcs_set_variables(state->boot, variables, variable_size);
@@ -218,6 +247,7 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
     open_sound(state);
     (*env)->ReleaseStringUTFChars(env, game_path, root);
     if (wanted != NULL) (*env)->ReleaseStringUTFChars(env, wanted_script, wanted);
+    if (saves != NULL) (*env)->ReleaseStringUTFChars(env, save_folder, saves);
     return (jlong) (intptr_t) state;
 
 failed:
@@ -225,6 +255,7 @@ failed:
     close_session(state);
     (*env)->ReleaseStringUTFChars(env, game_path, root);
     if (wanted != NULL) (*env)->ReleaseStringUTFChars(env, wanted_script, wanted);
+    if (saves != NULL) (*env)->ReleaseStringUTFChars(env, save_folder, saves);
     return 0;
 }
 
@@ -302,13 +333,14 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeStep(
  * and their layouts over it. That is the order the game builds its screen -
  * a scene script underneath, the front end's own furniture above it.
  */
-JNIEXPORT void JNICALL
+JNIEXPORT jint JNICALL
 Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeFrame(
         JNIEnv *env, jclass type, jlong handle, jintArray pixels) {
     (void) type;
     session *state = from_handle(handle);
-    if (state == NULL) return;
+    if (state == NULL) return 0;
     size_t count = (size_t) state->width * state->height;
+    uint64_t composing = cs2_now();
     const cs2_scene *scenario = cs2_system_scenario(state->system);
     if (scenario != NULL) {
         const uint32_t *drawn = cs2_render_frame(state->render, scenario, NULL);
@@ -317,7 +349,36 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeFrame(
         for (size_t i = 0; i < count; i++) state->canvas[i] = 0xff000000u;
     }
     cs2_system_draw(state->system, state->canvas, state->width, state->height);
-    (*env)->SetIntArrayRegion(env, pixels, 0, (jsize) count, (const jint *) state->canvas);
+    cs2_span_add(CS2_SPAN_COMPOSE, composing);
+
+    /*
+     * What is new about this picture, as whole rows: the first row that differs
+     * from the one on the screen and the last. A reader reading is looking at a
+     * picture where the only thing moving is the line of text appearing, so most
+     * frames are a band a tenth of the screen high and many are nothing at all -
+     * and a row of pixels not handed over is a row Java does not copy into its
+     * bitmap and the display does not redraw.
+     */
+    uint64_t handing = cs2_now();
+    int first = -1, last = -1;
+    size_t row_bytes = (size_t) state->width * sizeof *state->canvas;
+    for (int row = 0; row < state->height; row++) {
+        const uint32_t *made = state->canvas + (size_t) row * state->width;
+        uint32_t *showing = state->shown + (size_t) row * state->width;
+        if (memcmp(made, showing, row_bytes) == 0) continue;
+        memcpy(showing, made, row_bytes);
+        if (first < 0) first = row;
+        last = row;
+    }
+    if (first >= 0) {
+        (*env)->SetIntArrayRegion(env, pixels, (jsize) ((size_t) first * state->width),
+                                  (jsize) ((size_t) (last - first + 1) * state->width),
+                                  (const jint *) (state->canvas + (size_t) first * state->width));
+    }
+    cs2_span_add(CS2_SPAN_UPLOAD, handing);
+    cs2_frame_done();
+    if (first < 0) return 0;
+    return (jint) (((uint32_t) first << 16) | (uint32_t) (last - first + 1));
 }
 
 /*
