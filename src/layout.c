@@ -16,6 +16,7 @@
 #include "cs2.h"
 #include "font.h"
 #include "hg3.h"
+#include "paint.h"
 
 /*
  * A layout's own numbered variables. Thirty-two was what the title screen
@@ -1154,29 +1155,6 @@ void cs2_layout_frame(cs2_layout *layout) {
 
 /* --------------------------------------------------------------- the drawing */
 
-static void blend(uint32_t *canvas, int width, int height, int x, int y,
-                  const cs2_hg3_frame *image, int alpha) {
-    for (int row = 0; row < image->height; row++) {
-        int to_y = y + row;
-        if (to_y < 0 || to_y >= height) continue;
-        for (int column = 0; column < image->width; column++) {
-            int to_x = x + column;
-            if (to_x < 0 || to_x >= width) continue;
-            uint32_t pixel = image->pixels[(size_t) row * image->width + column];
-            uint32_t a = ((pixel >> 24) & 0xffu) * (uint32_t) alpha / 255u;
-            if (a == 0) continue;
-            uint32_t under = canvas[(size_t) to_y * width + to_x];
-            uint32_t out = 0xff000000u;
-            for (int shift = 0; shift <= 16; shift += 8) {
-                uint32_t over = (pixel >> shift) & 0xffu;
-                uint32_t below = (under >> shift) & 0xffu;
-                out |= ((over * a + below * (255u - a)) / 255u) << shift;
-            }
-            canvas[(size_t) to_y * width + to_x] = out;
-        }
-    }
-}
-
 static const object_state *plane_of(cs2_layout *layout, const char *name) {
     if (name == NULL || name[0] == 0) return NULL;
     char base[40];
@@ -1297,7 +1275,8 @@ static void draw_one(cs2_layout *layout, const object_state *object,
         x += plane->declared.x + plane->declared.base_x;
         y += plane->declared.y + plane->declared.base_y;
     }
-    blend(canvas, width, height, x, y, image, alpha);
+    cs2_paint_pixels(canvas, width, height, x, y, image->pixels,
+                     image->width, image->height, alpha);
 }
 
 void cs2_layout_draw(cs2_layout *layout, uint32_t *canvas, int width, int height) {
