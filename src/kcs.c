@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "cs2.h"
+#include "frametime.h"
 
 #define KCS_HEADER      0x34u
 #define KCS_MAX_IMAGE   (64u * 1024u * 1024u)
@@ -217,6 +218,22 @@ uint32_t cs2_kcs_suspend_address(const cs2_kcs *script) { return script->suspend
 
 uint64_t cs2_kcs_instructions(const cs2_kcs *script) { return script->instructions; }
 uint32_t cs2_kcs_pc(const cs2_kcs *script) { return script->pc; }
+
+const void *cs2_kcs_globals(const cs2_kcs *script, uint32_t *size) {
+    if (size != NULL) *size = script == NULL ? 0 : script->globals_size;
+    return script == NULL ? NULL : script->memory;
+}
+
+int cs2_kcs_set_globals(cs2_kcs *script, const void *globals, uint32_t size) {
+    if (script == NULL || globals == NULL || size != script->globals_size) {
+        cs2_set_error("this save holds %u bytes of script state and %s wants %u",
+                      (unsigned) size, script == NULL ? "the script" : script->name,
+                      (unsigned) (script == NULL ? 0 : script->globals_size));
+        return -1;
+    }
+    memcpy(script->memory, globals, size);
+    return 0;
+}
 uint32_t cs2_kcs_base(const cs2_kcs *script) { return script->base; }
 const char *cs2_kcs_name(const cs2_kcs *script) { return script->name; }
 
@@ -1005,7 +1022,7 @@ static int step(cs2_kcs *script) {
     }
 }
 
-int cs2_kcs_frame(cs2_kcs *script, uint32_t budget) {
+static int run_a_frame(cs2_kcs *script, uint32_t budget) {
     if (script->fault) return -1;
     /*
      * A frame begins by answering whatever the last one stopped waiting for.
@@ -1027,4 +1044,17 @@ int cs2_kcs_frame(cs2_kcs *script, uint32_t budget) {
     }
     fault(script, "the script has run %u instructions without stopping for a frame", budget);
     return -1;
+}
+
+/*
+ * Stepping the game's own scripts is one of the things a frame is spent on, so
+ * it is one of the things the frame-time line accounts for. Both scripts come
+ * through here - the boot script and whatever it started - and the span adds
+ * them up, which is what the reader of that line wants to know.
+ */
+int cs2_kcs_frame(cs2_kcs *script, uint32_t budget) {
+    uint64_t began = cs2_now();
+    int running = run_a_frame(script, budget);
+    cs2_span_add(CS2_SPAN_SCRIPT, began);
+    return running;
 }

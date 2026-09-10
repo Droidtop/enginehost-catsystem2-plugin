@@ -16,6 +16,7 @@
 #include "cs2.h"
 #include "font.h"
 #include "hg3.h"
+#include "paint.h"
 
 /*
  * A layout's own numbered variables. Thirty-two was what the title screen
@@ -76,10 +77,19 @@ struct object_state {
     int frames_left;
     int point_size;              /* the height its face is drawn at */
     uint32_t colour;
+
+    /*
+     * A save panel: `s_panel[n] setsave <slot> <mask> 0` binds the panel to a
+     * slot, and everything the panel shows or answers afterwards - `getflag`
+     * above all - is about that slot.
+     */
+    int save_bound;
+    int save_slot;
 };
 
 struct cs2_layout {
     cs2_files *files;
+    cs2_pictures *pictures;
     cs2_fes *fes;
     cs2_layout_host host;
     object_state *objects;
@@ -94,7 +104,6 @@ struct cs2_layout {
     int result;
     cs2_layout *child;
     char state[64];
-    char missing[64];        /* the last image this copy of the game has not got */
 
     /*
      * The reader. A click is kept as the clicked object's identity, which is
@@ -239,6 +248,17 @@ static int32_t primary(reader *r) {
         size_t from = 0;
         const object_state *object = object_of(r->layout, name, &from);
         return object == NULL ? 0 : (int32_t) from;
+    }
+    /*
+     * Base ten unless the file says otherwise. The save screen writes its
+     * masks and its two string kinds in hex - "setsave <slot> 0x400 0",
+     * "saveapend_str $805 0x80000000 $str155" - and reading those as decimal
+     * gave zero and left the rest of the line unread. Only an explicit 0x is
+     * treated as hex: a leading zero in these files is a decimal number with
+     * a zero in front of it, not octal.
+     */
+    if (r->at[0] == '0' && (r->at[1] == 'x' || r->at[1] == 'X')) {
+        return (int32_t) (uint32_t) strtoul(r->at, (char **) &r->at, 16);
     }
     return (int32_t) strtol(r->at, (char **) &r->at, 10);
 }
@@ -561,6 +581,33 @@ static int arguments_of(cs2_layout *layout, const char *rest, int *a, int *b, in
 }
 
 /*
+ * The nth space-separated word of a line, as it stands. Word 0 is the command.
+ */
+static int word_of(const char *line, int index, char *into, size_t size) {
+    for (int i = 0; ; i++) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (*line == 0) return 0;
+        size_t length = 0;
+        while (line[length] != 0 && line[length] != ' ' && line[length] != '\t') length++;
+        if (i == index) {
+            if (length + 1 > size) length = size - 1;
+            memcpy(into, line, length);
+            into[length] = 0;
+            return 1;
+        }
+        line += length;
+    }
+}
+
+/* And that word as a number, because every argument in these files is an
+   expression: "saveexist ($802*\100)+\0 1026". */
+static int32_t argument_of(cs2_layout *layout, const char *line, int index) {
+    char word[128];
+    if (!word_of(line, index, word, sizeof word)) return 0;
+    return evaluate(layout, word);
+}
+
+/*
  * A command addressed to an object: "pl_bgi fade 60 0 255", "btn_d disp 1",
  * "btn_d[4] enable 0". A bare name is every element of the array, which is how
  * the files switch a whole row of buttons at once.
@@ -593,6 +640,22 @@ static int object_command(cs2_layout *layout, const char *line) {
             object->declared.y = b;
         } else if (strcmp(command, "fade") == 0 && given >= 3) {
             fade_start(object, a, b, c);
+        } else if (strcmp(command, "setsave") == 0 && given >= 1) {
+            object->save_bound = 1;
+            object->save_slot = a;
+        } else if (strcmp(command, "getflag") == 0 && given >= 2) {
+            /*
+             * A flag out of the save the panel is bound to, into one of the
+             * game's own flags. -1 where the save does not carry it, which is
+             * the answer the load path tests for: "if ($541!=-1)".
+             */
+            int32_t value = -1;
+            if (object->save_bound && layout->host.save_flag != NULL) {
+                layout->host.save_flag(layout->host.context, object->save_slot, a, &value);
+            }
+            if (layout->host.set_flag != NULL) {
+                layout->host.set_flag(layout->host.context, b, value);
+            }
         }
         /*
          * load, play, stop, blend and the rest are the sound and motion
@@ -753,7 +816,8 @@ static void run_lines(cs2_layout *layout, int one_frame) {
             char name[48] = "";
             sscanf(line, "%*s %47s", name);
             cs2_layout_free(layout->child);
-            layout->child = cs2_layout_start(layout->files, name, &layout->host);
+            layout->child = cs2_layout_start(layout->files, layout->pictures, name,
+                                             &layout->host);
             if (layout->child == NULL) cs2_log("%s", cs2_error());
             layout->line++;
             continue;
@@ -780,6 +844,23 @@ static void run_lines(cs2_layout *layout, int one_frame) {
             layout->line++;
             continue;
         }
+        /*
+         * The event a screen sends the system script. The message window's
+         * own buttons are written entirely in these: Q.Save is
+         * "send 0xffff0003 0 21" and nothing else.
+         */
+        if (strcmp(word, "send") == 0) {
+            uint32_t class_ = (uint32_t) argument_of(layout, line, 1);
+            uint32_t which = (uint32_t) argument_of(layout, line, 2);
+            uint32_t code = (uint32_t) argument_of(layout, line, 3);
+            cs2_log("%s.fes sends %#x %u %u", cs2_fes_name(layout->fes),
+                    class_, which, code);
+            if (layout->host.post != NULL) {
+                layout->host.post(layout->host.context, class_, which, code);
+            }
+            layout->line++;
+            continue;
+        }
         if (strcmp(word, "strvar") == 0) {
             int number = 0;
             char value[128] = "";
@@ -790,6 +871,94 @@ static void run_lines(cs2_layout *layout, int one_frame) {
             layout->line++;
             continue;
         }
+        /*
+         * The save vocabulary. These are the questions _saveload.fes and
+         * flow.fes ask the engine about the game's own saves; loading is not
+         * among them, because a load is done by booting the system script on
+         * the slot number rather than by a call.
+         */
+        if (strcmp(word, "saveexist") == 0) {
+            int slot = (int) argument_of(layout, line, 1);
+            int into = (int) argument_of(layout, line, 2);
+            int there = layout->host.save_exists != NULL
+                     && layout->host.save_exists(layout->host.context, slot);
+            if (layout->host.set_flag != NULL) {
+                layout->host.set_flag(layout->host.context, into, there);
+            }
+            layout->line++;
+            continue;
+        }
+        if (strcmp(word, "newsave") == 0) {
+            int into = (int) argument_of(layout, line, 1);
+            int from = (int) argument_of(layout, line, 2);
+            int to = (int) argument_of(layout, line, 3);
+            int newest = layout->host.save_newest == NULL ? -1
+                       : layout->host.save_newest(layout->host.context, from, to);
+            if (layout->host.set_flag != NULL) {
+                layout->host.set_flag(layout->host.context, into, newest);
+            }
+            layout->line++;
+            continue;
+        }
+        /*
+         * "datasave $805 $10". The second argument is what the original hands
+         * its own writer beside the slot; what a save holds is the engine's
+         * business here, so the slot is the whole of it.
+         */
+        if (strcmp(word, "datasave") == 0) {
+            if (layout->host.save_write != NULL) {
+                layout->host.save_write(layout->host.context,
+                                        (int) argument_of(layout, line, 1));
+            }
+            layout->line++;
+            continue;
+        }
+        if (strcmp(word, "savedelete") == 0) {
+            if (layout->host.save_delete != NULL) {
+                layout->host.save_delete(layout->host.context,
+                                         (int) argument_of(layout, line, 1));
+            }
+            layout->line++;
+            continue;
+        }
+        if (strcmp(word, "saveexchg") == 0 || strcmp(word, "savecopy") == 0) {
+            int a = (int) argument_of(layout, line, 1);
+            int b = (int) argument_of(layout, line, 2);
+            if (word[4] == 'e' && layout->host.save_exchange != NULL) {
+                layout->host.save_exchange(layout->host.context, a, b);
+            } else if (word[4] == 'c' && layout->host.save_copy != NULL) {
+                layout->host.save_copy(layout->host.context, a, b);
+            }
+            layout->line++;
+            continue;
+        }
+        if (strcmp(word, "saveget_str") == 0) {
+            int slot = (int) argument_of(layout, line, 1);
+            uint32_t what = (uint32_t) argument_of(layout, line, 2);
+            int into = (int) argument_of(layout, line, 3);
+            const char *text = layout->host.save_string == NULL ? NULL
+                             : layout->host.save_string(layout->host.context, slot, what);
+            if (layout->host.set_string != NULL) {
+                layout->host.set_string(layout->host.context, into, text == NULL ? "" : text);
+            }
+            layout->line++;
+            continue;
+        }
+        if (strcmp(word, "saveapend_str") == 0) {
+            int slot = (int) argument_of(layout, line, 1);
+            uint32_t what = (uint32_t) argument_of(layout, line, 2);
+            char token[128] = "";
+            word_of(line, 3, token, sizeof token);
+            char *text = string_argument(layout, token);
+            if (layout->host.save_set_string != NULL) {
+                layout->host.save_set_string(layout->host.context, slot, what,
+                                             text == NULL ? "" : text);
+            }
+            free(text);
+            layout->line++;
+            continue;
+        }
+
         if (line[0] == '$' || line[0] == '\\') {
             const char *equals = strchr(line, '=');
             if (equals != NULL && equals[1] != '=') {
@@ -880,13 +1049,15 @@ int32_t cs2_layout_local(const cs2_layout *layout, int number) {
 
 /* --------------------------------------------------------------- the layout */
 
-cs2_layout *cs2_layout_start(cs2_files *files, const char *name, const cs2_layout_host *host) {
+cs2_layout *cs2_layout_start(cs2_files *files, cs2_pictures *pictures, const char *name,
+                             const cs2_layout_host *host) {
     cs2_layout *layout = calloc(1, sizeof *layout);
     if (layout == NULL) {
         cs2_set_error("out of memory for a layout");
         return NULL;
     }
     layout->files = files;
+    layout->pictures = pictures;
     layout->host = *host;
     layout->result = -1;
     layout->focus = -1;
@@ -983,29 +1154,6 @@ void cs2_layout_frame(cs2_layout *layout) {
 }
 
 /* --------------------------------------------------------------- the drawing */
-
-static void blend(uint32_t *canvas, int width, int height, int x, int y,
-                  const cs2_hg3_frame *image, int alpha) {
-    for (int row = 0; row < image->height; row++) {
-        int to_y = y + row;
-        if (to_y < 0 || to_y >= height) continue;
-        for (int column = 0; column < image->width; column++) {
-            int to_x = x + column;
-            if (to_x < 0 || to_x >= width) continue;
-            uint32_t pixel = image->pixels[(size_t) row * image->width + column];
-            uint32_t a = ((pixel >> 24) & 0xffu) * (uint32_t) alpha / 255u;
-            if (a == 0) continue;
-            uint32_t under = canvas[(size_t) to_y * width + to_x];
-            uint32_t out = 0xff000000u;
-            for (int shift = 0; shift <= 16; shift += 8) {
-                uint32_t over = (pixel >> shift) & 0xffu;
-                uint32_t below = (under >> shift) & 0xffu;
-                out |= ((over * a + below * (255u - a)) / 255u) << shift;
-            }
-            canvas[(size_t) to_y * width + to_x] = out;
-        }
-    }
-}
 
 static const object_state *plane_of(cs2_layout *layout, const char *name) {
     if (name == NULL || name[0] == 0) return NULL;
@@ -1112,32 +1260,23 @@ static void draw_one(cs2_layout *layout, const object_state *object,
     if (plane != NULL) alpha = alpha * plane->alpha / 255;
     if (alpha <= 0) return;
 
-    char path[160];
-    snprintf(path, sizeof path, "image.int/%s.hg3", object->declared.file);
-    cs2_bytes file = {0};
-    if (cs2_files_read(layout->files, path, &file) != 0) {
-        if (strcmp(layout->missing, object->declared.file) != 0) {
-            snprintf(layout->missing, sizeof layout->missing, "%s", object->declared.file);
-            cs2_log("%s.fes wants %s, which is not in this copy of the game",
-                    cs2_fes_name(layout->fes), path);
-        }
-        return;
-    }
-    cs2_hg3_frame image = {0};
-    if (cs2_hg3_decode_id(file.data, file.size, id, &image) != 0) {
-        cs2_log("%s: %s", path, cs2_error());
-        cs2_bytes_free(&file);
-        return;
-    }
-    int x = object->declared.x + image.offset_x;
-    int y = object->declared.y + image.offset_y;
+    /*
+     * One picture out of the run's own store of decoded ones. Until that store
+     * existed this read the whole archive entry and decoded the frame again for
+     * every piece of every screen, every frame - the title screen alone did it
+     * four times a frame - which is the greater part of why the console called
+     * the game incredibly slow.
+     */
+    const cs2_hg3_frame *image = cs2_pictures_id(layout->pictures, object->declared.file, id);
+    if (image == NULL) return;
+    int x = object->declared.x + image->offset_x;
+    int y = object->declared.y + image->offset_y;
     if (plane != NULL) {
         x += plane->declared.x + plane->declared.base_x;
         y += plane->declared.y + plane->declared.base_y;
     }
-    blend(canvas, width, height, x, y, &image, alpha);
-    cs2_hg3_frame_free(&image);
-    cs2_bytes_free(&file);
+    cs2_paint_pixels(canvas, width, height, x, y, image->pixels,
+                     image->width, image->height, alpha);
 }
 
 void cs2_layout_draw(cs2_layout *layout, uint32_t *canvas, int width, int height) {
@@ -1248,38 +1387,31 @@ static void ensure_boxes(cs2_layout *layout) {
         resolve_the_box(layout, &layout->objects[i]);
     }
     for (size_t i = 0; i < layout->object_count; i++) {
-        if (layout->objects[i].boxes_read) continue;
-        char name[64];
-        snprintf(name, sizeof name, "%s", layout->objects[i].declared.file);
-        if (name[0] == 0) {
-            layout->objects[i].boxes_read = 1;
+        object_state *object = &layout->objects[i];
+        if (object->boxes_read) continue;
+        if (object->declared.file[0] == 0) {
+            object->boxes_read = 1;
             continue;
         }
-        char path[160];
-        snprintf(path, sizeof path, "image.int/%s.hg3", name);
-        cs2_bytes file = {0};
-        int opened = cs2_files_read(layout->files, path, &file) == 0;
-        /* One read of the file answers for every object drawn out of it. */
-        for (size_t j = i; j < layout->object_count; j++) {
-            object_state *object = &layout->objects[j];
-            if (object->boxes_read || strcmp(object->declared.file, name) != 0) continue;
-            object->boxes_read = 1;
-            if (!opened) continue;
-            for (int k = 0; k < CS2_FES_IDS; k++) {
-                if (object->declared.ids[k] < 0) continue;
-                cs2_hg3_frame frame = {0};
-                if (cs2_hg3_bounds_id(file.data, file.size,
-                                      object->declared.ids[k], &frame) != 0) {
-                    continue;
-                }
-                object->boxes[k].known = 1;
-                object->boxes[k].offset_x = frame.offset_x;
-                object->boxes[k].offset_y = frame.offset_y;
-                object->boxes[k].width = frame.width;
-                object->boxes[k].height = frame.height;
-            }
+        /*
+         * A picture this copy of the game has not got is left unread rather
+         * than answered: a layout can name a picture through one of the game's
+         * own numbered strings, and that string may be set a frame later.
+         */
+        if (!cs2_pictures_has(layout->pictures, object->declared.file)) continue;
+        object->boxes_read = 1;
+        for (int k = 0; k < CS2_FES_IDS; k++) {
+            if (object->declared.ids[k] < 0) continue;
+            const cs2_hg3_frame *frame = cs2_pictures_id(layout->pictures,
+                                                         object->declared.file,
+                                                         object->declared.ids[k]);
+            if (frame == NULL) continue;
+            object->boxes[k].known = 1;
+            object->boxes[k].offset_x = frame->offset_x;
+            object->boxes[k].offset_y = frame->offset_y;
+            object->boxes[k].width = frame->width;
+            object->boxes[k].height = frame->height;
         }
-        if (opened) cs2_bytes_free(&file);
     }
 }
 

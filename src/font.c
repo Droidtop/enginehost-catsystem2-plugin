@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "frametime.h"
+
 #define STB_TRUETYPE_IMPLEMENTATION
 #define STBTT_STATIC
 /* The header is one file offering far more than glyph rasterising; the parts
@@ -109,7 +111,7 @@ int cs2_font_measure(const cs2_font *font, const char *text) {
     return (int) (width + 0.5f);
 }
 
-int cs2_font_draw(const cs2_font *font, uint32_t *canvas, int width, int height,
+static int draw_the_line(const cs2_font *font, uint32_t *canvas, int width, int height,
                   int x, int y, const char *text, uint32_t colour) {
     if (font == NULL || text == NULL) return 0;
     int line_height = cs2_font_height(font);
@@ -157,6 +159,19 @@ int cs2_font_draw(const cs2_font *font, uint32_t *canvas, int width, int height,
         previous = code;
     }
     return line_height;
+}
+
+/*
+ * Drawing text is the other half of what a frame is spent on, and a reader
+ * watching a line appear a character at a time is watching it be drawn sixty
+ * times a second, so it is worth its own span.
+ */
+int cs2_font_draw(const cs2_font *font, uint32_t *canvas, int width, int height,
+                  int x, int y, const char *text, uint32_t colour) {
+    uint64_t began = cs2_now();
+    int drawn = draw_the_line(font, canvas, width, height, x, y, text, colour);
+    cs2_span_add(CS2_SPAN_TEXT, began);
+    return drawn;
 }
 
 /* The game's own font, whichever face it ships beside its archives. */

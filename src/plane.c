@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "cs2.h"
+#include "paint.h"
 
 #define PLANE_LIMIT 512
 
@@ -143,21 +144,6 @@ static int shown(const cs2_planes *planes, const cs2_plane_state *plane) {
     return 1;
 }
 
-static void blend(uint32_t *pixel, uint32_t colour) {
-    uint32_t alpha = colour >> 24;
-    if (alpha == 0) return;
-    if (alpha == 255) {
-        *pixel = colour;
-        return;
-    }
-    uint32_t under = *pixel, out = 0xff000000u;
-    for (int shift = 0; shift <= 16; shift += 8) {
-        uint32_t a = (under >> shift) & 0xffu, b = (colour >> shift) & 0xffu;
-        out |= ((b * alpha + a * (255u - alpha)) / 255u) << shift;
-    }
-    *pixel = out;
-}
-
 void cs2_planes_draw(const cs2_planes *planes, uint32_t *canvas, int width, int height) {
     if (planes == NULL || canvas == NULL) return;
     /*
@@ -192,16 +178,9 @@ void cs2_planes_draw(const cs2_planes *planes, uint32_t *canvas, int width, int 
          * agree, and a picture the game has scaled arrives already scaled.
          */
         if (plane->pixels != NULL) {
-            for (int y = 0; y < plane->pixel_height; y++) {
-                int to_y = top + plane->pixel_y + y;
-                if (to_y < 0 || to_y >= height) continue;
-                for (int x = 0; x < plane->pixel_width; x++) {
-                    int to_x = left + plane->pixel_x + x;
-                    if (to_x < 0 || to_x >= width) continue;
-                    blend(&canvas[(size_t) to_y * width + to_x],
-                          plane->pixels[(size_t) y * plane->pixel_width + x]);
-                }
-            }
+            cs2_paint_pixels(canvas, width, height, left + plane->pixel_x,
+                             top + plane->pixel_y, plane->pixels,
+                             plane->pixel_width, plane->pixel_height, 255);
             continue;
         }
         if (!plane->filled) continue;
@@ -213,14 +192,7 @@ void cs2_planes_draw(const cs2_planes *planes, uint32_t *canvas, int width, int 
          * with the game underneath it.
          */
         if (plane->width == 0 || plane->height == 0) continue;
-        int wide = (int) plane->width;
-        int tall = (int) plane->height;
-        for (int y = top; y < top + tall; y++) {
-            if (y < 0 || y >= height) continue;
-            for (int x = left; x < left + wide; x++) {
-                if (x < 0 || x >= width) continue;
-                blend(&canvas[(size_t) y * width + x], plane->colour);
-            }
-        }
+        cs2_paint_fill(canvas, width, height, left, top, (int) plane->width,
+                       (int) plane->height, plane->colour);
     }
 }

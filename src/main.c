@@ -13,8 +13,10 @@
 
 #include "audio.h"
 #include "files.h"
+#include "frametime.h"
 #include "kcs.h"
 #include "plane.h"
+#include "pictures.h"
 #include "png.h"
 #include "render.h"
 #include "scene.h"
@@ -43,6 +45,10 @@ static void usage(void) {
         "                    does; may be given more than once\n"
         "  --press <n>:<key> press up, down, left, right, confirm or cancel on frame n;\n"
         "                    may be given more than once\n"
+        "  --saves <folder>  where the game's own saves are kept (default ./saves).\n"
+        "                    Never the game folder: that is the player's\n"
+        "  --draw            compose every frame, the way a console that is showing\n"
+        "                    the game has to, and say where the time went\n"
         "  --shot <file>     draw one frame into a PNG and exit, opening no window\n"
         "  --dump-scene      print the scenario the way the system script reads it:\n"
         "                    every line, its words and what kind each word is\n"
@@ -203,6 +209,8 @@ int main(int argc, char **argv) {
     const char *list = NULL;
     const char *images = NULL;
     const char *kcs_script = NULL;
+    const char *saves = "saves";
+    int draw_each = 0;
     int kcs_frames = 0;
     int boot_type = -20;
     int boot_given = 0;
@@ -229,6 +237,8 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) wanted_script = argv[++i];
         else if (strcmp(argv[i], "--dump-scene") == 0) dump_scene = 1;
         else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--saves") == 0 && i + 1 < argc) saves = argv[++i];
+        else if (strcmp(argv[i], "--draw") == 0) draw_each = 1;
         else if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];
         else if (strcmp(argv[i], "--list") == 0 && i + 1 < argc) list = argv[++i];
         else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) images = argv[++i];
@@ -334,7 +344,17 @@ int main(int argc, char **argv) {
             cs2_files_close(files);
             return 1;
         }
-        cs2_system *system = cs2_system_new(files, width, height);
+        /*
+         * One store of decoded pictures for the whole run, shared by the front
+         * end's layouts and the scene being composed: a screen is the same few
+         * pictures over and over.
+         */
+        cs2_pictures *pictures = cs2_pictures_new(files, 0);
+        if (pictures == NULL) {
+            fprintf(stderr, "%s\n", cs2_error());
+            return 1;
+        }
+        cs2_system *system = cs2_system_new(files, pictures, width, height);
         if (system == NULL) {
             fprintf(stderr, "%s\n", cs2_error());
             return 1;
@@ -359,6 +379,7 @@ int main(int argc, char **argv) {
                 cs2_system_set_audio(system, audio);
             }
         }
+        cs2_system_set_save_folder(system, saves);
         /* The game's own layout sets the boot type; --boot overrides it. */
         if (boot_given) cs2_system_set_boot(system, boot_type, boot_scene);
         uint32_t variable_size = 0;
@@ -372,6 +393,23 @@ int main(int argc, char **argv) {
          * run a frame each, in that order, sharing one block of the game's own
          * persistent variables.
          */
+        /*
+         * The console composes a picture every frame; a run that only draws the
+         * last one measures everything except the part the reader complained
+         * about. --draw does what the console does, so "where does the frame
+         * go" can be asked here rather than on the device.
+         */
+        cs2_render *each_frame = NULL;
+        uint32_t *each_canvas = NULL;
+        if (draw_each) {
+            each_frame = cs2_render_new(files, pictures, width, height);
+            each_canvas = calloc((size_t) width * height, sizeof *each_canvas);
+            if (each_frame == NULL || each_canvas == NULL) {
+                fprintf(stderr, "no room to compose %dx%d frames\n", width, height);
+                return 1;
+            }
+            cs2_frametime(1);
+        }
         int running = 1, frame = 0;
         for (; running == 1 && frame < kcs_frames && !cs2_system_finished(system); frame++) {
             for (int i = 0; i < action_count; i++) {
@@ -387,7 +425,25 @@ int main(int argc, char **argv) {
             }
             running = cs2_kcs_frame(system_script, 2000000);
             cs2_system_frame(system);
+            if (draw_each) {
+                uint64_t began = cs2_now();
+                const cs2_scene *showing = cs2_system_scenario(system);
+                if (showing != NULL) {
+                    const uint32_t *drawn = cs2_render_frame(each_frame, showing, NULL);
+                    memcpy(each_canvas, drawn, (size_t) width * height * sizeof *each_canvas);
+                } else {
+                    for (size_t i = 0; i < (size_t) width * height; i++) {
+                        each_canvas[i] = 0xff000000u;
+                    }
+                }
+                cs2_system_draw(system, each_canvas, width, height);
+                cs2_span_add(CS2_SPAN_COMPOSE, began);
+                cs2_frame_done();
+            }
         }
+        cs2_render_free(each_frame);
+        free(each_canvas);
+        cs2_frametime(0);
         if (running < 0) fprintf(stderr, "%s\n", cs2_error());
         cs2_log("%s: %d frames, %llu instructions, stopped at %#x%s", path, frame,
                 (unsigned long long) cs2_kcs_instructions(system_script),
@@ -426,7 +482,7 @@ int main(int argc, char **argv) {
                  * it: the front end puts a scene script on the screen and hangs
                  * its own furniture above it, so that is the order it is drawn.
                  */
-                cs2_render *render = cs2_render_new(files, width, height);
+                cs2_render *render = cs2_render_new(files, pictures, width, height);
                 if (render != NULL && scenario != NULL) {
                     const uint32_t *drawn = cs2_render_frame(render, scenario, NULL);
                     memcpy(canvas, drawn, (size_t) width * height * sizeof *canvas);
@@ -449,6 +505,7 @@ int main(int argc, char **argv) {
         cs2_kcs_set_variables(system_script, NULL, 0);
         cs2_kcs_free(system_script);
         cs2_system_free(system);
+        cs2_pictures_free(pictures);
         cs2_startup_free(startup);
         cs2_files_close(files);
         return result;
@@ -535,7 +592,8 @@ int main(int argc, char **argv) {
 
     int width, height;
     if (screen(startup, &width, &height) != 0) return 1;
-    cs2_render *render = cs2_render_new(files, width, height);
+    cs2_pictures *pictures = cs2_pictures_new(files, 0);
+    cs2_render *render = pictures == NULL ? NULL : cs2_render_new(files, pictures, width, height);
     if (render == NULL) {
         fprintf(stderr, "%s\n", cs2_error());
         return 1;
@@ -605,6 +663,7 @@ int main(int argc, char **argv) {
     }
     desktop_audio = NULL;
     cs2_render_free(render);
+    cs2_pictures_free(pictures);
     cs2_scene_free(scene);
     cs2_audio_free(audio);
     cs2_text_free(text);

@@ -106,6 +106,28 @@ uint64_t cs2_kcs_instructions(const cs2_kcs *script);
 uint32_t cs2_kcs_pc(const cs2_kcs *script);
 
 /*
+ * The script's own globals: everything below its stack.
+ *
+ * This is what a saved game has to carry besides the story's flags. The
+ * system script's reading machine keeps its whole state here - which of its
+ * twenty-two screens is up, the sub-state inside it, where the scene stack
+ * is - and a game loaded without it comes back with the right scenario and no
+ * idea that it is reading one. Taking it as a block is also the only way to
+ * carry it that stays true for a game this engine has never seen: which word
+ * of the globals means what is a fact about the game's own compiled script,
+ * so the engine copies them all and names none of them.
+ *
+ * The stack is deliberately not part of it. A load happens inside a call the
+ * script is making, so the frame that call is standing on has to survive.
+ *
+ * cs2_kcs_set_globals refuses a block that is not exactly this script's own
+ * size, which is what a save from another game - or another build of the same
+ * one - would hand it.
+ */
+const void *cs2_kcs_globals(const cs2_kcs *script, uint32_t *size);
+int cs2_kcs_set_globals(cs2_kcs *script, const void *globals, uint32_t size);
+
+/*
  * Where the call being run keeps its arguments and its locals. The game's own
  * string formatting names a variable by bank and offset, and its "L" bank is
  * counted from here, exactly as the frameaddr opcode counts.
