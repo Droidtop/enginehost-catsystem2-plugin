@@ -5,9 +5,11 @@ android {
     compileSdk = 36
     defaultConfig {
         minSdk = 26
-        // The console is arm64. Adding an ABI is a line here and a longer build,
-        // not a change to anything in the engine.
-        ndk { abiFilters += listOf("arm64-v8a") }
+        // One bundle serves every device: the host picks lib/<abi> out of the
+        // bundle from Build.SUPPORTED_ABIS, so both ABIs ship side by side.
+        // arm64-v8a is the console; x86_64 is x86 hardware and the Android
+        // emulator rig we test on. Nothing in the engine depends on either.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
     // The engine is compiled from the branch this wrapper is merged onto. On the
     // wrapper's own branch there is no src/ and CMake says so plainly.

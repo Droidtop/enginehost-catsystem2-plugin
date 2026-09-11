@@ -67,12 +67,19 @@ jobs:
           mkdir -p build/payload build/output
           unzip -p app/build/outputs/aar/app-release.aar classes.jar > build/classes.jar
           "$ANDROID_HOME/build-tools/36.0.0/d8" --release --min-api 26 --output build/payload build/classes.jar
-          # The engine itself. Enginehost puts lib/<abi> from the bundle on the
-          # runtime class loader's library path, so this is all it takes for
-          # System.loadLibrary to find it.
-          mkdir -p build/payload/lib/arm64-v8a
-          unzip -j app/build/outputs/aar/app-release.aar 'jni/arm64-v8a/*.so' -d build/payload/lib/arm64-v8a
+          # The engine itself, every ABI the wrapper build produced. Enginehost
+          # puts lib/<abi> from the bundle on the runtime class loader's library
+          # path, so this is all it takes for System.loadLibrary to find it.
+          # Reading the ABI list out of the aar instead of naming one keeps the
+          # packaging step honest when abiFilters changes.
+          for abi in $(unzip -Z1 app/build/outputs/aar/app-release.aar 'jni/*/*.so' | cut -d/ -f2 | sort -u); do
+            mkdir -p "build/payload/lib/$abi"
+            unzip -j app/build/outputs/aar/app-release.aar "jni/$abi/*.so" -d "build/payload/lib/$abi"
+          done
+          # Both ABIs are the rule, not a preference: a bundle that lost one
+          # would install and then fail to load on half the devices.
           test -f build/payload/lib/arm64-v8a/libcatsystem2.so
+          test -f build/payload/lib/x86_64/libcatsystem2.so
           cp LICENSE THIRD_PARTY.md build/payload/
           printf '%s' "$ENGINEHOST_SIGNING_KEY_PEM" > build/signing-key.pem
           python3 enginehost-tooling/scripts/build-engine-bundle.py \
