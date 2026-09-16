@@ -53,7 +53,14 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      # 2026-09-16: setup-android's default package list still asks for the
+      # obsolete "tools" SDK package, which Google has withdrawn from the
+      # repository, so sdkmanager exits 1 and the job dies before Gradle runs.
+      # The runner image already ships platform-tools and the command-line
+      # tools; an empty list makes the action only put them on PATH.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: ""
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
