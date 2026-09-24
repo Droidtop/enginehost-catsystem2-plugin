@@ -1058,7 +1058,7 @@ void cs2_system_click(cs2_system *system, int x, int y, int button) {
     for (size_t i = system->layout_count; i-- > 0; ) {
         if (cs2_layout_click(system->layouts[i].layout, x, y, button)) taken = 1;
     }
-    if (!taken && button != 2) cs2_system_post(system, EVENT_SYSTEM, 0, EVENT_ADVANCE);
+    if (!taken && button != 2) cs2_system_advance(system);
 }
 
 void cs2_system_press(cs2_system *system, cs2_layout_key key) {
@@ -1067,9 +1067,12 @@ void cs2_system_press(cs2_system *system, cs2_layout_key key) {
     for (size_t i = system->layout_count; i-- > 0; ) {
         if (cs2_layout_press(system->layouts[i].layout, key)) taken = 1;
     }
-    if (!taken && key == CS2_LAYOUT_CONFIRM) {
-        cs2_system_post(system, EVENT_SYSTEM, 0, EVENT_ADVANCE);
-    }
+    if (!taken && key == CS2_LAYOUT_CONFIRM) cs2_system_advance(system);
+}
+
+void cs2_system_advance(cs2_system *system) {
+    if (system == NULL) return;
+    cs2_system_post(system, EVENT_SYSTEM, 0, EVENT_ADVANCE);
 }
 
 size_t cs2_system_layout_count(const cs2_system *system) {

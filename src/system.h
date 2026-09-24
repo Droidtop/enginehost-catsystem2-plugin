@@ -103,6 +103,12 @@ const cs2_layout *cs2_system_layout(const cs2_system *system);
 void cs2_system_pointer(cs2_system *system, int x, int y);
 void cs2_system_click(cs2_system *system, int x, int y, int button);
 void cs2_system_press(cs2_system *system, cs2_layout_key key);
+/*
+ * The reader asking to go on: the game's own "Advance Text" (key02 of
+ * startup.xml's KEYCUSTOMIZE), which is what a click that lands on no button
+ * and a confirm that no screen takes both come to.
+ */
+void cs2_system_advance(cs2_system *system);
 
 /* The whole screen the front end has built: the planes and their layouts. */
 void cs2_system_draw(cs2_system *system, uint32_t *canvas, int width, int height);
