@@ -422,7 +422,9 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativePointer(
 /*
  * The pad. The d-pad walks the buttons of whatever screen is up, over the
  * layout's own KEYBLOCK grids; confirm presses the one it is on and also
- * advances the scenario, because on a console it is the same button for both.
+ * advances the scenario when no screen takes it, as Enter does for the
+ * original, where Confirm and Advance Text share the key. Advance Text goes
+ * on whatever the screen has up.
  */
 JNIEXPORT void JNICALL
 Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeKey(
@@ -448,6 +450,10 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeKey(
         cs2_system_event(state->system, 1);
         break;
     case 5: cs2_system_press(state->system, CS2_LAYOUT_CANCEL); break;
+    case 6:
+        cs2_system_advance(state->system);
+        cs2_system_event(state->system, 1);
+        break;
     default: break;
     }
 }
