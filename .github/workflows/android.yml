@@ -41,15 +41,15 @@ concurrency:
 
 jobs:
   bundle:
+    # Builds and packs the payload. No signing key and no write token here:
+    # Gradle, its plugins and the third-party actions below run in this job
+    # (Enginehost docs/security/2026-09-24-ci-supply-chain.md).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: Droidtop/enginehost
-          ref: codex/engine-bundles
-          path: enginehost-tooling
-      - uses: actions/setup-java@v4
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
@@ -58,67 +58,80 @@ jobs:
       # repository, so sdkmanager exits 1 and the job dies before Gradle runs.
       # The runner image already ships platform-tools and the command-line
       # tools; an empty list makes the action only put them on PATH.
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           packages: ""
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         with:
           gradle-version: "8.13"
       - name: Build wrapper library
         run: gradle :app:assembleRelease --no-daemon --stacktrace
-      - name: Build signed Enginehost bundle
-        env:
-          ENGINEHOST_SIGNING_KEY_PEM: ${{ secrets.ENGINEHOST_SIGNING_KEY_PEM }}
+      - name: Pack the unsigned bundle inputs
         run: |
-          test -n "$ENGINEHOST_SIGNING_KEY_PEM"
-          mkdir -p build/payload build/output
+          set -euo pipefail
+          mkdir -p build/unsigned/payload
           unzip -p app/build/outputs/aar/app-release.aar classes.jar > build/classes.jar
-          "$ANDROID_HOME/build-tools/36.0.0/d8" --release --min-api 26 --output build/payload build/classes.jar
+          "$ANDROID_HOME/build-tools/36.0.0/d8" --release --min-api 26 --output build/unsigned/payload build/classes.jar
           # The engine itself, every ABI the wrapper build produced. Enginehost
           # puts lib/<abi> from the bundle on the runtime class loader's library
           # path, so this is all it takes for System.loadLibrary to find it.
           # Reading the ABI list out of the aar instead of naming one keeps the
           # packaging step honest when abiFilters changes.
           for abi in $(unzip -Z1 app/build/outputs/aar/app-release.aar 'jni/*/*.so' | cut -d/ -f2 | sort -u); do
-            mkdir -p "build/payload/lib/$abi"
-            unzip -j app/build/outputs/aar/app-release.aar "jni/$abi/*.so" -d "build/payload/lib/$abi"
+            mkdir -p "build/unsigned/payload/lib/$abi"
+            unzip -j app/build/outputs/aar/app-release.aar "jni/$abi/*.so" -d "build/unsigned/payload/lib/$abi"
           done
           # Both ABIs are the rule, not a preference: a bundle that lost one
           # would install and then fail to load on half the devices.
-          test -f build/payload/lib/arm64-v8a/libcatsystem2.so
-          test -f build/payload/lib/x86_64/libcatsystem2.so
-          cp LICENSE THIRD_PARTY.md build/payload/
-          printf '%s' "$ENGINEHOST_SIGNING_KEY_PEM" > build/signing-key.pem
-          python3 enginehost-tooling/scripts/build-engine-bundle.py \
-            --metadata enginehost/bundle-metadata.json --payload build/payload \
-            --private-key build/signing-key.pem \
-            --repository-key-document enginehost-public-key.json \
-            --output build/output/dev.enginehost.catsystem2.cst.v1.enginehost.tar.xz \
-            --release-envelope build/output/enginehost-release.json \
-            --public-key-document build/output/enginehost-public-key.json
-          cmp enginehost-public-key.json build/output/enginehost-public-key.json
-      - uses: actions/upload-artifact@v4
+          test -f build/unsigned/payload/lib/arm64-v8a/libcatsystem2.so
+          test -f build/unsigned/payload/lib/x86_64/libcatsystem2.so
+          cp LICENSE THIRD_PARTY.md build/unsigned/payload/
+          cp enginehost/bundle-metadata.json build/unsigned/bundle-metadata.json
+          # A tar keeps the file modes the manifest signs; an artifact would not.
+          tar -cf build/unsigned.tar -C build/unsigned payload bundle-metadata.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: enginehost-catsystem2-cst-v1
-          path: build/output/*
+          name: enginehost-catsystem2-cst-v1-unsigned
+          path: build/unsigned.tar
+          if-no-files-found: error
+
+  sign:
+    # Enginehost's one signing mechanism, pinned by commit: the key never
+    # shares a runner with the build.
+    needs: bundle
+    permissions:
+      contents: read
+    uses: Droidtop/enginehost/.github/workflows/sign-engine-bundle.yml@74162ce067087af604ee5a54edcd09eb9f872922
+    with:
+      tooling-sha: 74162ce067087af604ee5a54edcd09eb9f872922
+      unsigned-artifact: enginehost-catsystem2-cst-v1-unsigned
+      bundle: dev.enginehost.catsystem2.cst.v1.enginehost.tar.xz
+      artifact-name: enginehost-catsystem2-cst-v1
+    secrets:
+      ENGINEHOST_SIGNING_KEY_PEM: ${{ secrets.ENGINEHOST_SIGNING_KEY_PEM }}
 
   publish:
     # Promotion is deliberate: a manual dispatch names the channel. Stable
     # means used with real games on hardware; testing means it runs games
     # but has not been lived with. Enginehost offers each person the channel
     # they chose in Settings and every steadier one.
-    needs: bundle
+    needs: sign
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          name: enginehost-catsystem2-cst-v1
           path: release
       - name: Publish the signed bundle on the chosen channel
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
           CHANNEL: ${{ inputs.channel }}
           REQUESTED_TAG: ${{ inputs.tag }}
         run: |
@@ -154,20 +167,19 @@ jobs:
             unstable) [[ "$tag" == *-unstable ]] || tag="$tag-unstable"; prerelease="--prerelease" ;;
             *) echo "unknown channel $CHANNEL" >&2; exit 1 ;;
           esac
-          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`${{ github.ref_name }}\` at \`${{ github.sha }}\` (build ${{ github.run_number }}). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
+          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`$REF_NAME\` at \`$SHA\` (build $RUN_NUMBER). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
           if [ "$CHANNEL" = unstable ] || [ "$CHANNEL" = testing ]; then
             # Rolling: the newest green build of the line is the whole release.
-            gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+            gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
             gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+              --target "$SHA" \
               --title "$id ($CHANNEL)" $prerelease --notes "$notes"
-          elif gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --repo "${{ github.repository }}" --clobber
-            gh release edit "$tag" --repo "${{ github.repository }}" --notes "$notes"
+          elif gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} --clobber
+            gh release edit "$tag" --notes "$notes"
           else
             gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+              --target "$SHA" \
               --title "$id ($CHANNEL)" $prerelease --notes "$notes"
           fi
 
@@ -176,20 +188,25 @@ jobs:
     # the unstable channel, replacing the previous one, so a person who opted
     # into unstable in Enginehost sees each build the moment CI is done with
     # it. Branches whose build makes no bundle publish nothing.
-    needs: bundle
+    needs: sign
     if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          name: enginehost-catsystem2-cst-v1
           path: release
       - name: Publish the signed bundle on the unstable channel
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
           CHANNEL: unstable
-          REQUESTED_TAG: 
+          REQUESTED_TAG: ""
         run: |
           set -euo pipefail
           # No artifact at all (a branch whose build makes no bundle) means no
@@ -223,19 +240,18 @@ jobs:
             unstable) [[ "$tag" == *-unstable ]] || tag="$tag-unstable"; prerelease="--prerelease" ;;
             *) echo "unknown channel $CHANNEL" >&2; exit 1 ;;
           esac
-          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`${{ github.ref_name }}\` at \`${{ github.sha }}\` (build ${{ github.run_number }}). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
+          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`$REF_NAME\` at \`$SHA\` (build $RUN_NUMBER). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
           if [ "$CHANNEL" = unstable ]; then
             # Rolling: the newest green build of the line is the whole release.
-            gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+            gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
             gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+              --target "$SHA" \
               --title "$id (unstable)" $prerelease --notes "$notes"
-          elif gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --repo "${{ github.repository }}" --clobber
-            gh release edit "$tag" --repo "${{ github.repository }}" --notes "$notes"
+          elif gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} --clobber
+            gh release edit "$tag" --notes "$notes"
           else
             gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+              --target "$SHA" \
               --title "$id ($CHANNEL)" $prerelease --notes "$notes"
           fi
