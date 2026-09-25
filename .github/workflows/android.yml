@@ -141,6 +141,27 @@ jobs:
               --title "$id ($CHANNEL)" $prerelease --notes "$notes"
           fi
 
+      - name: Ask droidtop-platforms to reindex
+        env:
+          # Enginehost reads droidtop-platforms' plugins/index.json before it
+          # asks GitHub's API anything, so a release is only offered once that
+          # index knows about it. A cross-repository dispatch needs a token of
+          # its own; this job's GITHUB_TOKEN cannot reach another repository.
+          # Without the secret this is a no-op and the index's scheduled run
+          # picks the release up within hours. See droidtop-platforms
+          # plugins/README.md.
+          GH_TOKEN: ${{ secrets.PLATFORMS_DISPATCH_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "No PLATFORMS_DISPATCH_TOKEN; the plugins index picks this release up on its schedule."
+            exit 0
+          fi
+          gh api repos/Droidtop/droidtop-platforms/dispatches \
+            -f event_type=plugin-published \
+            -f "client_payload[repo]=$GH_REPO"
+
   unstable:
     # Every green push that produced a signed bundle is published as-is on
     # the unstable channel, replacing the previous one, so a person who opted
@@ -210,3 +231,24 @@ jobs:
             gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
               --title "$id ($CHANNEL)" $prerelease --notes "$notes"
           fi
+
+      - name: Ask droidtop-platforms to reindex
+        env:
+          # Enginehost reads droidtop-platforms' plugins/index.json before it
+          # asks GitHub's API anything, so a release is only offered once that
+          # index knows about it. A cross-repository dispatch needs a token of
+          # its own; this job's GITHUB_TOKEN cannot reach another repository.
+          # Without the secret this is a no-op and the index's scheduled run
+          # picks the release up within hours. See droidtop-platforms
+          # plugins/README.md.
+          GH_TOKEN: ${{ secrets.PLATFORMS_DISPATCH_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "No PLATFORMS_DISPATCH_TOKEN; the plugins index picks this release up on its schedule."
+            exit 0
+          fi
+          gh api repos/Droidtop/droidtop-platforms/dispatches \
+            -f event_type=plugin-published \
+            -f "client_payload[repo]=$GH_REPO"
