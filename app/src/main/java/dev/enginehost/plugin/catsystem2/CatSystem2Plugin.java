@@ -13,8 +13,10 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import dev.enginehost.api.EngineControllerEvent;
+import dev.enginehost.api.EngineFileBroker;
 import dev.enginehost.api.EnginePlugin;
 import dev.enginehost.api.EnginePluginSession;
+import dev.enginehost.api.EngineStepDriven;
 import java.io.File;
 import java.io.IOException;
 
@@ -31,7 +33,7 @@ import java.io.IOException;
  * the game's screen is drawn scaled onto the console's. No part of the engine
  * is repeated in Java, and nothing here decides what the game shows.
  */
-public final class CatSystem2Plugin implements EnginePlugin {
+public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
     static {
         System.loadLibrary("catsystem2");
     }
@@ -43,6 +45,7 @@ public final class CatSystem2Plugin implements EnginePlugin {
     private static final int KEY_RIGHT = 3;
     private static final int KEY_CONFIRM = 4;
     private static final int KEY_CANCEL = 5;
+    private static final int KEY_ADVANCE = 6;
 
     private static final String TAG = "catsystem2";
 
@@ -57,6 +60,9 @@ public final class CatSystem2Plugin implements EnginePlugin {
      * the other carries the pad, never both, so a press is never counted twice.
      */
     private boolean hostSendsThePad;
+    /* The left stick, as the pointer's speed: -1 to 1 on each axis. */
+    private float pointerAcross;
+    private float pointerDown;
 
     @Override public void onCreate(EnginePluginSession session) throws Exception {
         this.session = session;
@@ -68,13 +74,46 @@ public final class CatSystem2Plugin implements EnginePlugin {
          * Never the game folder: that is the reader's, and on this console it is
          * a card the plugin does not write to.
          */
-        File saves = session.host().saveDirectory();
-        if (saves != null && !saves.isDirectory()) saves.mkdirs();
-        engine = nativeOpen(session.gamePath(), session.execFile(),
-                            saves == null ? null : saves.getAbsolutePath());
+        EngineFileBroker gameBroker = session.host().gameBroker();
+        if (gameBroker != null) {
+            // Sandbox layer 2 (docs/engine-sandbox.md): this process cannot
+            // resolve the game or save folder itself, so both cross to the
+            // host process over the broker instead of a real path. There is
+            // no session.display() to attach a View into either -- see
+            // step() below, which is how this plugin runs without one.
+            engine = nativeOpenIsolated(gameBroker, session.execFile(), session.host().saveBroker());
+        } else {
+            File saves = session.host().saveDirectory();
+            if (saves != null && !saves.isDirectory()) saves.mkdirs();
+            engine = nativeOpen(session.gamePath(), session.execFile(),
+                                saves == null ? null : saves.getAbsolutePath());
+        }
         if (engine == 0) throw new IOException(nativeError());
-        view = new ScreenView();
-        session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
+        if (session.display() != null) {
+            view = new ScreenView();
+            session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
+        }
+    }
+
+    @Override public int pixelWidth() { return engine == 0 ? 0 : nativeWidth(engine); }
+    @Override public int pixelHeight() { return engine == 0 ? 0 : nativeHeight(engine); }
+
+    /** The isolated runtime's frame pump; see EngineStepDriven. The in-process ScreenView drives the same two calls itself. */
+    @Override public int step(int[] pixels) {
+        if (engine == 0) return -1;
+        if (!nativeStep(engine)) return -1;
+        return nativeFrame(engine, pixels);
+    }
+
+    /** Already in this engine's own pixel space (EngineStepDriven); the in-process path does the same scaling in ScreenView. */
+    @Override public void onPointerMove(int x, int y) {
+        if (engine != 0) nativePointer(engine, x, y);
+    }
+
+    @Override public void onPointerUp(int x, int y) {
+        if (engine == 0) return;
+        nativePointer(engine, x, y);
+        nativeTouch(engine, x, y);
     }
 
     @Override public void onPause() {
@@ -96,10 +135,19 @@ public final class CatSystem2Plugin implements EnginePlugin {
     }
 
     /**
-     * The pad. The front end - the title screen, the scenario list, the menus -
-     * is a set of buttons the game lays out itself, and the d-pad walks them;
-     * confirm presses the one it is on, and cancel is what the layouts read as
-     * a right click. Nothing here decides what a button does.
+     * The pad, in CatSystem2's own action names: Enginehost's cs2_* actions
+     * are the names of startup.xml's KEYCUSTOMIZE slots. The front end - the
+     * title screen, the scenario list, the menus - is a set of buttons the
+     * game lays out itself, and the cursor actions walk them; Confirm presses
+     * the one it is on, Cancel is what the layouts read as a right click, and
+     * Advance Text asks the scenario to go on. The left stick is the pointer,
+     * which focuses what it passes over, as a finger does. Nothing here
+     * decides what a button does.
+     *
+     * The other slots (skip and auto mode, the message log, quick save and
+     * load, the options screen, paging and scrolling, hiding the window,
+     * option history, force skip, voice replay and auto speed) are not
+     * carried out by this engine yet, so they are not taken.
      */
     @Override public boolean onControllerEvent(EngineControllerEvent event) {
         /*
@@ -108,17 +156,27 @@ public final class CatSystem2Plugin implements EnginePlugin {
          * plugin at all, and until now nothing on this side of the native call
          * could say.
          */
-        Log.i(TAG, "the host hands over " + event.action() + (event.pressed() ? " down" : " up"));
+        // Not the stick: it reports on every motion, and would drown the rest.
+        if (!event.action().startsWith("left_")) {
+            Log.i(TAG, "the host hands over " + event.action() + (event.pressed() ? " down" : " up"));
+        }
         hostSendsThePad = true;
-        if (engine == 0 || !event.pressed()) return false;
+        if (engine == 0) return false;
+        switch (event.action()) {
+            case "left_x": pointerAcross = event.value(); return true;
+            case "left_y": pointerDown = event.value(); return true;
+            default: break;
+        }
+        if (!event.pressed()) return false;
         int key;
         switch (event.action()) {
-            case "up": key = KEY_UP; break;
-            case "down": key = KEY_DOWN; break;
-            case "left": key = KEY_LEFT; break;
-            case "right": key = KEY_RIGHT; break;
-            case "confirm": case "page_next": key = KEY_CONFIRM; break;
-            case "cancel": key = KEY_CANCEL; break;
+            case "cs2_cursor_up": key = KEY_UP; break;
+            case "cs2_cursor_down": key = KEY_DOWN; break;
+            case "cs2_cursor_left": key = KEY_LEFT; break;
+            case "cs2_cursor_right": key = KEY_RIGHT; break;
+            case "cs2_confirm": key = KEY_CONFIRM; break;
+            case "cs2_cancel": key = KEY_CANCEL; break;
+            case "cs2_advance_text": key = KEY_ADVANCE; break;
             default: return false;
         }
         nativeKey(engine, key);
@@ -143,6 +201,9 @@ public final class CatSystem2Plugin implements EnginePlugin {
         private final Rect source;
         private final RectF destination = new RectF();
         private boolean running;
+        /* Where the pointer is, in the game's own pixels. */
+        private float pointerX;
+        private float pointerY;
 
         ScreenView() {
             super(session.host().context());
@@ -151,6 +212,8 @@ public final class CatSystem2Plugin implements EnginePlugin {
             pixels = new int[width * height];
             frame = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             source = new Rect(0, 0, width, height);
+            pointerX = width / 2f;
+            pointerY = height / 2f;
             setBackgroundColor(Color.BLACK);
             setFocusable(true);
             setFocusableInTouchMode(true);
@@ -167,6 +230,7 @@ public final class CatSystem2Plugin implements EnginePlugin {
 
         @Override public void doFrame(long frameTimeNanos) {
             if (!running || engine == 0) return;
+            movePointer();
             boolean alive = nativeStep(engine);
             /*
              * The engine answers with the rows of the picture that are not
@@ -184,6 +248,19 @@ public final class CatSystem2Plugin implements EnginePlugin {
             }
             if (alive) Choreographer.getInstance().postFrameCallback(this);
             else running = false;
+        }
+
+        /*
+         * The stick held over, the pointer moves: a full tilt crosses the
+         * screen's height in a second, and a stick at rest leaves it where a
+         * finger or the stick last put it.
+         */
+        private void movePointer() {
+            if (pointerAcross == 0 && pointerDown == 0) return;
+            float step = height / 60f;
+            pointerX = Math.max(0, Math.min(width - 1, pointerX + pointerAcross * step));
+            pointerY = Math.max(0, Math.min(height - 1, pointerY + pointerDown * step));
+            nativePointer(engine, Math.round(pointerX), Math.round(pointerY));
         }
 
         /** Where the game's fixed screen sits on the console's, letterboxed. */
@@ -212,6 +289,8 @@ public final class CatSystem2Plugin implements EnginePlugin {
             if (scale <= 0) return true;
             int x = Math.round((event.getX() - (getWidth() - width * scale) / 2) / scale);
             int y = Math.round((event.getY() - (getHeight() - height * scale) / 2) / scale);
+            pointerX = Math.max(0, Math.min(width - 1, x));
+            pointerY = Math.max(0, Math.min(height - 1, y));
             /*
              * The finger moves the pointer and the lift presses it. The screen
              * keeps one selection, so a finger dragged over a button focuses it
@@ -291,6 +370,8 @@ public final class CatSystem2Plugin implements EnginePlugin {
     }
 
     private static native long nativeOpen(String gamePath, String script, String saveFolder);
+    /** Sandbox layer 2 (docs/engine-sandbox.md): gameBroker/saveBroker take the place of gamePath/saveFolder. */
+    private static native long nativeOpenIsolated(EngineFileBroker gameBroker, String script, EngineFileBroker saveBroker);
     private static native void nativeClose(long engine);
     private static native void nativeSetSounding(long engine, boolean sounding);
     private static native String nativeError();
