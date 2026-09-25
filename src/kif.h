@@ -32,6 +32,9 @@ typedef struct {
 /* Looks through a game folder for the binary that carries the key. */
 void cs2_game_key_read(const char *game_root, cs2_game_key *out);
 
+/* Same search, over a host broker's listing (docs/engine-sandbox.md). */
+void cs2_game_key_read_via_broker(const cs2_broker *broker, cs2_game_key *out);
+
 /* The engine's passphrase fold: a normal, MSB-first CRC-32, inverted per byte. */
 uint32_t cs2_game_key_encode(const uint8_t *passphrase, size_t size);
 
