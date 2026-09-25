@@ -39,9 +39,15 @@ cs2_render *cs2_render_new(cs2_files *files, cs2_pictures *pictures, int width, 
         cs2_set_error("out of memory");
         return NULL;
     }
-    const char *root = cs2_files_root(files);
-    render->font = cs2_font_open_beside(root, 30);
-    render->small_font = cs2_font_open_beside(root, 19);
+    const cs2_broker *broker = cs2_files_broker(files);
+    if (broker != NULL) {
+        render->font = cs2_font_open_beside_via_broker(broker, 30);
+        render->small_font = cs2_font_open_beside_via_broker(broker, 19);
+    } else {
+        const char *root = cs2_files_root(files);
+        render->font = cs2_font_open_beside(root, 30);
+        render->small_font = cs2_font_open_beside(root, 19);
+    }
     if (render->font == NULL) {
         cs2_log("the game ships no font beside its archives; no text will be drawn");
     }

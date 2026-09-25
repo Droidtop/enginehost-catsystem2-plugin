@@ -352,24 +352,34 @@ const cs2_scene *cs2_system_scenario(const cs2_system *system) {
 }
 
 /* The sound device, for the scenario the front end plays. */
-void cs2_system_set_save_folder(cs2_system *system, const char *folder) {
-    if (system == NULL) return;
+static void set_save_store(cs2_system *system, cs2_saves *saves) {
     cs2_saves_free(system->saves);
-    system->saves = cs2_saves_open(folder);
+    system->saves = saves;
     if (system->saves == NULL) {
         cs2_log("this game cannot save: %s", cs2_error());
-    } else {
-        cs2_log("saves are kept in %s", cs2_saves_folder(system->saves));
-        /*
-         * And with the folder comes what the player has read. The game's own
-         * record file is not a save: it survives every save being deleted,
-         * which is what a "skip read text" is for.
-         */
-        cs2_save_clear(&system->read);
-        if (cs2_saves_read_named(system->saves, "savegen.dat", &system->read) == 0) {
-            cs2_log("the player has read %zu scenarios before", system->read.mark_count);
-        }
+        return;
     }
+    /*
+     * And with the folder comes what the player has read. The game's own
+     * record file is not a save: it survives every save being deleted,
+     * which is what a "skip read text" is for.
+     */
+    cs2_save_clear(&system->read);
+    if (cs2_saves_read_named(system->saves, "savegen.dat", &system->read) == 0) {
+        cs2_log("the player has read %zu scenarios before", system->read.mark_count);
+    }
+}
+
+void cs2_system_set_save_folder(cs2_system *system, const char *folder) {
+    if (system == NULL) return;
+    set_save_store(system, cs2_saves_open(folder));
+    if (system->saves != NULL) cs2_log("saves are kept in %s", cs2_saves_folder(system->saves));
+}
+
+/* Same wiring, over a host broker instead of a real folder (docs/engine-sandbox.md). */
+void cs2_system_set_save_broker(cs2_system *system, const cs2_broker *broker) {
+    if (system == NULL) return;
+    set_save_store(system, cs2_saves_open_via_broker(broker));
 }
 
 /*

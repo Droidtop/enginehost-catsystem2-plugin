@@ -13,8 +13,10 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import dev.enginehost.api.EngineControllerEvent;
+import dev.enginehost.api.EngineFileBroker;
 import dev.enginehost.api.EnginePlugin;
 import dev.enginehost.api.EnginePluginSession;
+import dev.enginehost.api.EngineStepDriven;
 import java.io.File;
 import java.io.IOException;
 
@@ -31,7 +33,7 @@ import java.io.IOException;
  * the game's screen is drawn scaled onto the console's. No part of the engine
  * is repeated in Java, and nothing here decides what the game shows.
  */
-public final class CatSystem2Plugin implements EnginePlugin {
+public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
     static {
         System.loadLibrary("catsystem2");
     }
@@ -72,13 +74,46 @@ public final class CatSystem2Plugin implements EnginePlugin {
          * Never the game folder: that is the reader's, and on this console it is
          * a card the plugin does not write to.
          */
-        File saves = session.host().saveDirectory();
-        if (saves != null && !saves.isDirectory()) saves.mkdirs();
-        engine = nativeOpen(session.gamePath(), session.execFile(),
-                            saves == null ? null : saves.getAbsolutePath());
+        EngineFileBroker gameBroker = session.host().gameBroker();
+        if (gameBroker != null) {
+            // Sandbox layer 2 (docs/engine-sandbox.md): this process cannot
+            // resolve the game or save folder itself, so both cross to the
+            // host process over the broker instead of a real path. There is
+            // no session.display() to attach a View into either -- see
+            // step() below, which is how this plugin runs without one.
+            engine = nativeOpenIsolated(gameBroker, session.execFile(), session.host().saveBroker());
+        } else {
+            File saves = session.host().saveDirectory();
+            if (saves != null && !saves.isDirectory()) saves.mkdirs();
+            engine = nativeOpen(session.gamePath(), session.execFile(),
+                                saves == null ? null : saves.getAbsolutePath());
+        }
         if (engine == 0) throw new IOException(nativeError());
-        view = new ScreenView();
-        session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
+        if (session.display() != null) {
+            view = new ScreenView();
+            session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
+        }
+    }
+
+    @Override public int pixelWidth() { return engine == 0 ? 0 : nativeWidth(engine); }
+    @Override public int pixelHeight() { return engine == 0 ? 0 : nativeHeight(engine); }
+
+    /** The isolated runtime's frame pump; see EngineStepDriven. The in-process ScreenView drives the same two calls itself. */
+    @Override public int step(int[] pixels) {
+        if (engine == 0) return -1;
+        if (!nativeStep(engine)) return -1;
+        return nativeFrame(engine, pixels);
+    }
+
+    /** Already in this engine's own pixel space (EngineStepDriven); the in-process path does the same scaling in ScreenView. */
+    @Override public void onPointerMove(int x, int y) {
+        if (engine != 0) nativePointer(engine, x, y);
+    }
+
+    @Override public void onPointerUp(int x, int y) {
+        if (engine == 0) return;
+        nativePointer(engine, x, y);
+        nativeTouch(engine, x, y);
     }
 
     @Override public void onPause() {
@@ -335,6 +370,8 @@ public final class CatSystem2Plugin implements EnginePlugin {
     }
 
     private static native long nativeOpen(String gamePath, String script, String saveFolder);
+    /** Sandbox layer 2 (docs/engine-sandbox.md): gameBroker/saveBroker take the place of gamePath/saveFolder. */
+    private static native long nativeOpenIsolated(EngineFileBroker gameBroker, String script, EngineFileBroker saveBroker);
     private static native void nativeClose(long engine);
     private static native void nativeSetSounding(long engine, boolean sounding);
     private static native String nativeError();

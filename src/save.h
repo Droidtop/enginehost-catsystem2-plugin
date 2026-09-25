@@ -41,6 +41,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "broker.h"
+
 /* The two `what` numbers the screens use with saveget_str/saveapend_str. */
 #define CS2_SAVE_MESSAGE 0x200u        /* the player's own message */
 #define CS2_SAVE_TITLE   0x80000000u   /* the scene title */
@@ -94,6 +96,9 @@ typedef struct cs2_saves cs2_saves;
 
 /* NULL when the folder cannot be made or written to; cs2_error says why. */
 cs2_saves *cs2_saves_open(const char *folder);
+
+/* Same store, over a host broker instead of a real folder (docs/engine-sandbox.md). */
+cs2_saves *cs2_saves_open_via_broker(const cs2_broker *broker);
 void cs2_saves_free(cs2_saves *saves);
 const char *cs2_saves_folder(const cs2_saves *saves);
 

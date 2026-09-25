@@ -5,6 +5,7 @@
   "apiVersion": 1,
   "entrypoint": "dev.enginehost.plugin.catsystem2.CatSystem2Plugin",
   "origin": "https://github.com/droidtop/enginehost-catsystem2-plugin",
+  "isolatable": true,
   "dexFiles": [
     "classes.dex"
   ],

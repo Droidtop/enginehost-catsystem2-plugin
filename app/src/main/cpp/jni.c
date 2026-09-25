@@ -23,6 +23,7 @@
 #include <android/log.h>
 
 #include "audio.h"
+#include "broker.h"
 #include "cs2.h"
 #include "files.h"
 #include "frametime.h"
@@ -41,6 +42,25 @@ static void to_logcat(const char *line, void *context) {
     (void) context;
     __android_log_print(ANDROID_LOG_INFO, TAG, "%s", line);
 }
+
+/*
+ * A dev.enginehost.api.EngineFileBroker, reached from native code
+ * (docs/engine-sandbox.md "Host file service design"). Callbacks can fire
+ * from whatever thread the engine is stepped on -- an isolated runtime's
+ * step()/save calls arrive over Binder, which does not promise the same
+ * pool thread twice -- so this holds a JavaVM and attaches per call rather
+ * than assuming the JNIEnv that created it is still the right one.
+ */
+typedef struct {
+    JavaVM *vm;
+    jobject broker;       /* global ref */
+    jclass broker_class;  /* global ref */
+    jmethodID list_method;
+    jmethodID open_read_method;
+    jmethodID open_write_method;
+    jmethodID commit_write_method;
+    jmethodID delete_method;
+} jni_broker;
 
 typedef struct {
     cs2_files *files;
@@ -61,7 +81,183 @@ typedef struct {
     uint32_t *shown;
     int width, height;
     int running;                /* the boot script has not ended or faulted */
+    /* Non-NULL only for an isolated launch (docs/engine-sandbox.md). */
+    jni_broker *game_broker;
+    jni_broker *save_broker;
+    cs2_broker game_broker_ops;
+    cs2_broker save_broker_ops;
 } session;
+
+
+/*
+ * Creates the native side of one EngineFileBroker: a global ref (env's
+ * caller frame ends before the engine is done with it) plus every method
+ * ID this file calls, resolved once since a jmethodID, unlike a JNIEnv,
+ * is valid on any thread for as long as the class is loaded.
+ */
+static jni_broker *jni_broker_create(JNIEnv *env, jobject broker) {
+    if (broker == NULL) return NULL;
+    jni_broker *jb = calloc(1, sizeof *jb);
+    if (jb == NULL) return NULL;
+    (*env)->GetJavaVM(env, &jb->vm);
+    jb->broker = (*env)->NewGlobalRef(env, broker);
+    jclass local_class = (*env)->GetObjectClass(env, broker);
+    jb->broker_class = (jclass) (*env)->NewGlobalRef(env, local_class);
+    (*env)->DeleteLocalRef(env, local_class);
+    jb->list_method = (*env)->GetMethodID(
+        env, jb->broker_class, "list", "(Ljava/lang/String;)[Ljava/lang/String;");
+    jb->open_read_method = (*env)->GetMethodID(
+        env, jb->broker_class, "openRead", "(Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;");
+    jb->open_write_method = (*env)->GetMethodID(
+        env, jb->broker_class, "openWrite", "(Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;");
+    jb->commit_write_method = (*env)->GetMethodID(env, jb->broker_class, "commitWrite", "(Ljava/lang/String;)V");
+    jb->delete_method = (*env)->GetMethodID(env, jb->broker_class, "delete", "(Ljava/lang/String;)V");
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        (*env)->DeleteGlobalRef(env, jb->broker);
+        (*env)->DeleteGlobalRef(env, jb->broker_class);
+        free(jb);
+        return NULL;
+    }
+    return jb;
+}
+
+static void jni_broker_free(JNIEnv *env, jni_broker *jb) {
+    if (jb == NULL) return;
+    if (jb->broker != NULL) (*env)->DeleteGlobalRef(env, jb->broker);
+    if (jb->broker_class != NULL) (*env)->DeleteGlobalRef(env, jb->broker_class);
+    free(jb);
+}
+
+/* A JNIEnv valid on the calling thread, attaching it to the JVM if this is the first call on it. */
+static JNIEnv *jni_broker_env(jni_broker *jb, int *attached) {
+    JNIEnv *env = NULL;
+    *attached = 0;
+    if ((*jb->vm)->GetEnv(jb->vm, (void **) &env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*jb->vm)->AttachCurrentThread(jb->vm, &env, NULL) != 0) return NULL;
+        *attached = 1;
+    }
+    return env;
+}
+
+/* Takes a ParcelFileDescriptor's underlying fd as this process's own (dup'd) and releases the Java object. */
+static int jni_pfd_take(JNIEnv *env, jobject pfd) {
+    if (pfd == NULL) return -1;
+    jclass pfd_class = (*env)->GetObjectClass(env, pfd);
+    jmethodID get_fd = (*env)->GetMethodID(env, pfd_class, "getFd", "()I");
+    jint raw_fd = (*env)->CallIntMethod(env, pfd, get_fd);
+    int native_fd = (*env)->ExceptionCheck(env) ? -1 : dup((int) raw_fd);
+    jmethodID close_method = (*env)->GetMethodID(env, pfd_class, "close", "()V");
+    (*env)->CallVoidMethod(env, pfd, close_method);
+    (*env)->ExceptionClear(env); /* close() may throw; the dup above already has its own fd either way */
+    (*env)->DeleteLocalRef(env, pfd_class);
+    return native_fd;
+}
+
+static int broker_list(void *ctx, const char *relative_path, char names[][256], int max_names) {
+    jni_broker *jb = (jni_broker *) ctx;
+    int attached;
+    JNIEnv *env = jni_broker_env(jb, &attached);
+    if (env == NULL) return -1;
+    jstring jpath = (*env)->NewStringUTF(env, relative_path);
+    jobjectArray result = (jobjectArray) (*env)->CallObjectMethod(env, jb->broker, jb->list_method, jpath);
+    int count = -1;
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    } else {
+        count = 0;
+        if (result != NULL) {
+            jsize n = (*env)->GetArrayLength(env, result);
+            for (jsize i = 0; i < n && count < max_names; i++) {
+                jstring entry = (jstring) (*env)->GetObjectArrayElement(env, result, i);
+                const char *bytes = (*env)->GetStringUTFChars(env, entry, NULL);
+                snprintf(names[count], 256, "%s", bytes);
+                (*env)->ReleaseStringUTFChars(env, entry, bytes);
+                (*env)->DeleteLocalRef(env, entry);
+                count++;
+            }
+        }
+    }
+    if (result != NULL) (*env)->DeleteLocalRef(env, result);
+    (*env)->DeleteLocalRef(env, jpath);
+    if (attached) (*jb->vm)->DetachCurrentThread(jb->vm);
+    return count;
+}
+
+static int broker_open_read(void *ctx, const char *relative_path) {
+    jni_broker *jb = (jni_broker *) ctx;
+    int attached;
+    JNIEnv *env = jni_broker_env(jb, &attached);
+    if (env == NULL) return -1;
+    jstring jpath = (*env)->NewStringUTF(env, relative_path);
+    jobject pfd = (*env)->CallObjectMethod(env, jb->broker, jb->open_read_method, jpath);
+    int fd = -1;
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    } else {
+        fd = jni_pfd_take(env, pfd);
+    }
+    if (pfd != NULL) (*env)->DeleteLocalRef(env, pfd);
+    (*env)->DeleteLocalRef(env, jpath);
+    if (attached) (*jb->vm)->DetachCurrentThread(jb->vm);
+    return fd;
+}
+
+static int broker_open_write(void *ctx, const char *relative_path) {
+    jni_broker *jb = (jni_broker *) ctx;
+    int attached;
+    JNIEnv *env = jni_broker_env(jb, &attached);
+    if (env == NULL) return -1;
+    jstring jpath = (*env)->NewStringUTF(env, relative_path);
+    jobject pfd = (*env)->CallObjectMethod(env, jb->broker, jb->open_write_method, jpath);
+    int fd = -1;
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    } else {
+        fd = jni_pfd_take(env, pfd);
+    }
+    if (pfd != NULL) (*env)->DeleteLocalRef(env, pfd);
+    (*env)->DeleteLocalRef(env, jpath);
+    if (attached) (*jb->vm)->DetachCurrentThread(jb->vm);
+    return fd;
+}
+
+static int broker_commit_write(void *ctx, const char *relative_path) {
+    jni_broker *jb = (jni_broker *) ctx;
+    int attached;
+    JNIEnv *env = jni_broker_env(jb, &attached);
+    if (env == NULL) return -1;
+    jstring jpath = (*env)->NewStringUTF(env, relative_path);
+    (*env)->CallVoidMethod(env, jb->broker, jb->commit_write_method, jpath);
+    int ok = (*env)->ExceptionCheck(env) ? -1 : 0;
+    if (ok != 0) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, jpath);
+    if (attached) (*jb->vm)->DetachCurrentThread(jb->vm);
+    return ok;
+}
+
+static int broker_remove(void *ctx, const char *relative_path) {
+    jni_broker *jb = (jni_broker *) ctx;
+    int attached;
+    JNIEnv *env = jni_broker_env(jb, &attached);
+    if (env == NULL) return -1;
+    jstring jpath = (*env)->NewStringUTF(env, relative_path);
+    (*env)->CallVoidMethod(env, jb->broker, jb->delete_method, jpath);
+    int ok = (*env)->ExceptionCheck(env) ? -1 : 0;
+    if (ok != 0) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, jpath);
+    if (attached) (*jb->vm)->DetachCurrentThread(jb->vm);
+    return ok;
+}
+
+static void fill_broker(cs2_broker *out, jni_broker *jb) {
+    out->ctx = jb;
+    out->list = broker_list;
+    out->open_read = broker_open_read;
+    out->open_write = broker_open_write;
+    out->commit_write = broker_commit_write;
+    out->remove = broker_remove;
+}
 
 static session *from_handle(jlong handle) {
     return (session *) (intptr_t) handle;
@@ -132,7 +328,7 @@ static void close_sound(session *state) {
     state->audio = NULL;
 }
 
-static void close_session(session *state) {
+static void close_session(JNIEnv *env, session *state) {
     if (state == NULL) return;
     close_sound(state);
     if (state->boot != NULL) {
@@ -148,6 +344,10 @@ static void close_session(session *state) {
     cs2_files_close(state->files);
     free(state->canvas);
     free(state->shown);
+    /* Freed last: nothing above calls back into a broker, only closes
+       fds/FILE*s that already came from one. */
+    jni_broker_free(env, state->game_broker);
+    jni_broker_free(env, state->save_broker);
     free(state);
 }
 
@@ -156,34 +356,16 @@ static int screen_size(const cs2_startup *startup, const char *key, int fallback
     return value > 0 ? value : fallback;
 }
 
-JNIEXPORT jlong JNICALL
-Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
-        JNIEnv *env, jclass type, jstring game_path, jstring wanted_script,
-        jstring save_folder) {
-    (void) type;
-    const char *root = (*env)->GetStringUTFChars(env, game_path, NULL);
-    const char *wanted = wanted_script == NULL
-        ? NULL : (*env)->GetStringUTFChars(env, wanted_script, NULL);
-    const char *saves = save_folder == NULL
-        ? NULL : (*env)->GetStringUTFChars(env, save_folder, NULL);
-
-    /*
-     * Everything the engine says goes to logcat under this plugin's own tag.
-     * Without this it goes to stderr, which Android throws away, and a run on
-     * the console can say nothing about what the game asked for: which button
-     * a tap landed on, which layout is up, which engine function came next.
-     * dq-catsystem2-24 spent a whole run unable to say why a tap did nothing.
-     */
-    cs2_log_to(to_logcat, NULL);
-
-    session *state = calloc(1, sizeof *state);
-    if (state == NULL) {
-        cs2_set_error("out of memory");
-        goto failed;
-    }
-    state->files = cs2_files_open(root);
-    if (state->files == NULL) goto failed;
-
+/*
+ * Everything past having a cs2_files open: reads startup.xml, resolves the
+ * boot script, sizes the canvas, brings up pictures/system/render, wires
+ * saves (a real folder or a broker, whichever the caller gave), and starts
+ * sound. nativeOpen and nativeOpenIsolated differ only in how cs2_files and
+ * the save store are obtained; everything downstream of that is this one
+ * mechanism, not two.
+ */
+static jlong finish_open(JNIEnv *env, session *state, const char *wanted,
+                         const char *save_folder, const cs2_broker *save_broker) {
     const cs2_game_key *key = cs2_files_key(state->files);
     if (key->found) {
         __android_log_print(ANDROID_LOG_INFO, TAG,
@@ -231,7 +413,11 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
      * a folder of its own and the engine is told it. A game given none plays and
      * simply cannot save.
      */
-    if (saves != NULL && saves[0] != 0) cs2_system_set_save_folder(state->system, saves);
+    if (save_broker != NULL) {
+        cs2_system_set_save_broker(state->system, save_broker);
+    } else if (save_folder != NULL && save_folder[0] != 0) {
+        cs2_system_set_save_folder(state->system, save_folder);
+    }
     /*
      * And the frame-time line, which is how the console answers "why is this
      * slow": one line a second in logcat saying where the frame went.
@@ -245,26 +431,109 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
     __android_log_print(ANDROID_LOG_INFO, TAG, "the game boots into %s", path);
 
     open_sound(state);
-    (*env)->ReleaseStringUTFChars(env, game_path, root);
-    if (wanted != NULL) (*env)->ReleaseStringUTFChars(env, wanted_script, wanted);
-    if (saves != NULL) (*env)->ReleaseStringUTFChars(env, save_folder, saves);
     return (jlong) (intptr_t) state;
 
 failed:
     __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
-    close_session(state);
+    close_session(env, state);
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
+        JNIEnv *env, jclass type, jstring game_path, jstring wanted_script,
+        jstring save_folder) {
+    (void) type;
+    const char *root = (*env)->GetStringUTFChars(env, game_path, NULL);
+    const char *wanted = wanted_script == NULL
+        ? NULL : (*env)->GetStringUTFChars(env, wanted_script, NULL);
+    const char *saves = save_folder == NULL
+        ? NULL : (*env)->GetStringUTFChars(env, save_folder, NULL);
+
+    /*
+     * Everything the engine says goes to logcat under this plugin's own tag.
+     * Without this it goes to stderr, which Android throws away, and a run on
+     * the console can say nothing about what the game asked for: which button
+     * a tap landed on, which layout is up, which engine function came next.
+     * dq-catsystem2-24 spent a whole run unable to say why a tap did nothing.
+     */
+    cs2_log_to(to_logcat, NULL);
+
+    jlong handle = 0;
+    session *state = calloc(1, sizeof *state);
+    if (state == NULL) {
+        cs2_set_error("out of memory");
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
+    } else {
+        state->files = cs2_files_open(root);
+        if (state->files == NULL) {
+            __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
+            close_session(env, state);
+        } else {
+            handle = finish_open(env, state, wanted, saves, NULL);
+        }
+    }
     (*env)->ReleaseStringUTFChars(env, game_path, root);
     if (wanted != NULL) (*env)->ReleaseStringUTFChars(env, wanted_script, wanted);
     if (saves != NULL) (*env)->ReleaseStringUTFChars(env, save_folder, saves);
-    return 0;
+    return handle;
+}
+
+/*
+ * Sandbox layer 2 (docs/engine-sandbox.md), first milestone: the same open,
+ * with the game folder and the save folder each a host-brokered
+ * EngineFileBroker instead of a real path -- this process, under
+ * android:isolatedProcess, cannot resolve either path itself.
+ */
+JNIEXPORT jlong JNICALL
+Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpenIsolated(
+        JNIEnv *env, jclass type, jobject game_broker, jstring wanted_script,
+        jobject save_broker) {
+    (void) type;
+    const char *wanted = wanted_script == NULL
+        ? NULL : (*env)->GetStringUTFChars(env, wanted_script, NULL);
+
+    cs2_log_to(to_logcat, NULL);
+
+    jlong handle = 0;
+    session *state = calloc(1, sizeof *state);
+    if (state == NULL) {
+        cs2_set_error("out of memory");
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
+    } else {
+        state->game_broker = jni_broker_create(env, game_broker);
+        if (state->game_broker == NULL) {
+            cs2_set_error("no host file broker for the game folder");
+            __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
+            close_session(env, state);
+        } else {
+            fill_broker(&state->game_broker_ops, state->game_broker);
+            state->files = cs2_files_open_via_broker(&state->game_broker_ops);
+            if (state->files == NULL) {
+                __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
+                close_session(env, state);
+            } else {
+                const cs2_broker *save_ops = NULL;
+                if (save_broker != NULL) {
+                    state->save_broker = jni_broker_create(env, save_broker);
+                    if (state->save_broker != NULL) {
+                        fill_broker(&state->save_broker_ops, state->save_broker);
+                        save_ops = &state->save_broker_ops;
+                    }
+                }
+                handle = finish_open(env, state, wanted, NULL, save_ops);
+            }
+        }
+    }
+    if (wanted != NULL) (*env)->ReleaseStringUTFChars(env, wanted_script, wanted);
+    return handle;
 }
 
 JNIEXPORT void JNICALL
 Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeClose(
         JNIEnv *env, jclass type, jlong handle) {
-    (void) env;
     (void) type;
-    close_session(from_handle(handle));
+    close_session(env, from_handle(handle));
 }
 
 /* The reader left the game; the music should not follow them out of it. */

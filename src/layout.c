@@ -536,7 +536,10 @@ static const cs2_font *font_at(cs2_layout *layout, int point_size) {
         if (layout->fonts[i].point_size == point_size) return layout->fonts[i].font;
     }
     if (layout->font_count >= FONTS) return NULL;
-    cs2_font *font = cs2_font_open_beside(cs2_files_root(layout->files), point_size);
+    const cs2_broker *broker = cs2_files_broker(layout->files);
+    cs2_font *font = broker != NULL
+        ? cs2_font_open_beside_via_broker(broker, point_size)
+        : cs2_font_open_beside(cs2_files_root(layout->files), point_size);
     if (font == NULL) {
         cs2_log("%s.fes has text to draw and this game ships no font beside its archives",
                 cs2_fes_name(layout->fes));
