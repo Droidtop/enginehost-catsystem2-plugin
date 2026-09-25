@@ -3,6 +3,8 @@
 
 #include "font.h"
 
+#include "broker.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,24 +30,40 @@ struct cs2_font {
     int line_gap;
 };
 
-cs2_font *cs2_font_open(const char *path, int pixel_height) {
-    if (pixel_height <= 0 || pixel_height > 512) return NULL;
-    cs2_font *font = calloc(1, sizeof *font);
-    if (font == NULL) return NULL;
-    if (cs2_read_file(path, MAX_FONT, &font->file) != 0) {
-        free(font);
+static cs2_font *font_from_bytes(cs2_bytes file, const char *label, int pixel_height) {
+    if (pixel_height <= 0 || pixel_height > 512) {
+        cs2_bytes_free(&file);
         return NULL;
     }
+    cs2_font *font = calloc(1, sizeof *font);
+    if (font == NULL) {
+        cs2_bytes_free(&file);
+        return NULL;
+    }
+    font->file = file;
     int offset = stbtt_GetFontOffsetForIndex(font->file.data, 0);
     if (offset < 0 || !stbtt_InitFont(&font->info, font->file.data, offset)) {
         cs2_bytes_free(&font->file);
         free(font);
-        cs2_set_error("%s is not a font this engine can read", path);
+        cs2_set_error("%s is not a font this engine can read", label);
         return NULL;
     }
     font->scale = stbtt_ScaleForPixelHeight(&font->info, (float) pixel_height);
     stbtt_GetFontVMetrics(&font->info, &font->ascent, &font->descent, &font->line_gap);
     return font;
+}
+
+cs2_font *cs2_font_open(const char *path, int pixel_height) {
+    cs2_bytes file;
+    if (cs2_read_file(path, MAX_FONT, &file) != 0) return NULL;
+    return font_from_bytes(file, path, pixel_height);
+}
+
+/* Same face, over a descriptor rather than a path (docs/engine-sandbox.md). Consumes fd either way. */
+cs2_font *cs2_font_open_fd(int fd, int pixel_height) {
+    cs2_bytes file;
+    if (cs2_read_file_fd(fd, MAX_FONT, &file) != 0) return NULL;
+    return font_from_bytes(file, "a broker-provided font", pixel_height);
 }
 
 void cs2_font_free(cs2_font *font) {
@@ -193,4 +211,27 @@ cs2_font *cs2_font_open_beside(const char *root, int pixel_height) {
     char path[512];
     snprintf(path, sizeof path, "%s/%s", root, best);
     return cs2_font_open(path, pixel_height);
+}
+
+/* Same search, over a host broker's listing (docs/engine-sandbox.md). */
+cs2_font *cs2_font_open_beside_via_broker(const cs2_broker *broker, int pixel_height) {
+    if (broker == NULL) return NULL;
+    char (*names)[256] = malloc(CS2_BROKER_LIST_MAX * sizeof *names);
+    if (names == NULL) return NULL;
+    int total = broker->list(broker->ctx, "", names, CS2_BROKER_LIST_MAX);
+    char best[256] = "";
+    for (int i = 0; i < total; i++) {
+        size_t length = strlen(names[i]);
+        if (length < 5 || length >= sizeof best) continue;
+        const char *suffix = names[i] + length - 4;
+        if (!cs2_ieq(suffix, ".ttf") && !cs2_ieq(suffix, ".otf") && !cs2_ieq(suffix, ".ttc")) continue;
+        if (best[0] == '\0' || strcmp(names[i], best) < 0) memcpy(best, names[i], length + 1);
+    }
+    free(names);
+    if (best[0] == '\0') {
+        return NULL;
+    }
+    int fd = broker->open_read(broker->ctx, best);
+    if (fd < 0) return NULL;
+    return cs2_font_open_fd(fd, pixel_height);
 }

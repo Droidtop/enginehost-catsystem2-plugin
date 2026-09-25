@@ -14,14 +14,20 @@
 #ifndef CS2_FILES_H
 #define CS2_FILES_H
 
+#include "broker.h"
 #include "kif.h"
 
 typedef struct cs2_files cs2_files;
 
 cs2_files *cs2_files_open(const char *game_root);
+
+/* Same folder, over a host broker instead of a real path (docs/engine-sandbox.md). */
+cs2_files *cs2_files_open_via_broker(const cs2_broker *broker);
 void cs2_files_close(cs2_files *files);
 
 const char *cs2_files_root(const cs2_files *files);
+/* NULL unless this cs2_files was opened via cs2_files_open_via_broker. */
+const cs2_broker *cs2_files_broker(const cs2_files *files);
 const cs2_game_key *cs2_files_key(const cs2_files *files);
 
 /* The archive file names in the folder, lower-cased and in name order. */

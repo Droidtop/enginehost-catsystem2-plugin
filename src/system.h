@@ -81,6 +81,9 @@ void cs2_system_set_boot(cs2_system *system, int type, const char *scenario);
  */
 void cs2_system_set_save_folder(cs2_system *system, const char *folder);
 
+/* Same wiring, over a host broker instead of a real folder (docs/engine-sandbox.md). */
+void cs2_system_set_save_broker(cs2_system *system, const cs2_broker *broker);
+
 /* The sound device the scenario plays through, or NULL for a game with none. */
 void cs2_system_set_audio(cs2_system *system, cs2_audio *audio);
 

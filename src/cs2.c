@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <zlib.h>
 
 static char error_message[512] = "";
@@ -102,40 +103,63 @@ int cs2_inflate(const uint8_t *packed, size_t packed_size, uint8_t *plain, size_
     return 0;
 }
 
-int cs2_read_file(const char *path, size_t limit, cs2_bytes *out) {
+static int read_file_from(FILE *file, const char *label, size_t limit, cs2_bytes *out) {
     out->data = NULL;
     out->size = 0;
-    FILE *file = fopen(path, "rb");
-    if (file == NULL) {
-        cs2_set_error("cannot open %s", path);
-        return -1;
-    }
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
-        cs2_set_error("cannot measure %s", path);
+        cs2_set_error("cannot measure %s", label);
         return -1;
     }
     long length = ftell(file);
     rewind(file);
     if (length < 0 || (size_t) length > limit) {
         fclose(file);
-        cs2_set_error("%s is larger than %zu bytes", path, limit);
+        cs2_set_error("%s is larger than %zu bytes", label, limit);
         return -1;
     }
     uint8_t *data = length == 0 ? NULL : malloc((size_t) length);
     if (length > 0 && data == NULL) {
         fclose(file);
-        cs2_set_error("out of memory reading %s", path);
+        cs2_set_error("out of memory reading %s", label);
         return -1;
     }
     if (length > 0 && fread(data, 1, (size_t) length, file) != (size_t) length) {
         free(data);
         fclose(file);
-        cs2_set_error("%s ended early", path);
+        cs2_set_error("%s ended early", label);
         return -1;
     }
     fclose(file);
     out->data = data;
     out->size = (size_t) length;
     return 0;
+}
+
+int cs2_read_file(const char *path, size_t limit, cs2_bytes *out) {
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        out->data = NULL;
+        out->size = 0;
+        cs2_set_error("cannot open %s", path);
+        return -1;
+    }
+    return read_file_from(file, path, limit, out);
+}
+
+/*
+ * Same read, over a descriptor the caller already has (a host-brokered
+ * fd under an isolated runtime, docs/engine-sandbox.md) rather than a
+ * path this process could resolve itself. Consumes fd either way.
+ */
+int cs2_read_file_fd(int fd, size_t limit, cs2_bytes *out) {
+    FILE *file = fdopen(fd, "rb");
+    if (file == NULL) {
+        close(fd);
+        out->data = NULL;
+        out->size = 0;
+        cs2_set_error("cannot open a broker-provided descriptor");
+        return -1;
+    }
+    return read_file_from(file, "a broker-provided descriptor", limit, out);
 }

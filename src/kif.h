@@ -19,6 +19,7 @@
 #ifndef CS2_KIF_H
 #define CS2_KIF_H
 
+#include "broker.h"
 #include "cs2.h"
 
 typedef struct {
@@ -41,6 +42,14 @@ typedef struct cs2_kif cs2_kif;
  * one an encrypted archive fails and says so.
  */
 cs2_kif *cs2_kif_open(const char *path, const cs2_game_key *key);
+
+/*
+ * Same archive, opened from a descriptor the caller already has (a
+ * host-brokered fd under an isolated runtime, docs/engine-sandbox.md)
+ * rather than a path this process could resolve itself. label names the
+ * archive for cs2_set_error only. Consumes fd either way.
+ */
+cs2_kif *cs2_kif_open_fd(int fd, const char *label, const cs2_game_key *key);
 
 size_t cs2_kif_count(const cs2_kif *archive);
 const char *cs2_kif_name(const cs2_kif *archive, size_t index);

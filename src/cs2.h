@@ -57,4 +57,9 @@ int cs2_inflate(const uint8_t *packed, size_t packed_size, uint8_t *plain, size_
 /* Reads a whole file, up to limit bytes. */
 int cs2_read_file(const char *path, size_t limit, cs2_bytes *out);
 
+/* Same read, over an already-open descriptor rather than a path
+ * (docs/engine-sandbox.md "Host file service design"). Consumes fd
+ * either way. */
+int cs2_read_file_fd(int fd, size_t limit, cs2_bytes *out);
+
 #endif

@@ -6,7 +6,9 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
+#include "broker.h"
 #include "cs2.h"
 
 /*
@@ -29,10 +31,14 @@
 
 struct cs2_saves {
     char folder[512];
+    /* NULL for a real folder; set for an isolated launch, where every
+       open below goes through it instead (docs/engine-sandbox.md). */
+    const cs2_broker *broker;
 };
 
-static int write_to(const char *path, const cs2_save *from);
-static int read_from(const char *path, cs2_save *into);
+static int write_to(const cs2_saves *saves, const char *name, const cs2_save *from);
+static int read_from(const cs2_saves *saves, const char *name, cs2_save *into);
+static void full_path(const cs2_saves *saves, const char *name, char *into, size_t into_size);
 
 /* ------------------------------------------------------------- one save */
 
@@ -263,6 +269,17 @@ cs2_saves *cs2_saves_open(const char *folder) {
     return saves;
 }
 
+/* Same store, over a host broker instead of a real folder (docs/engine-sandbox.md). */
+cs2_saves *cs2_saves_open_via_broker(const cs2_broker *broker) {
+    cs2_saves *saves = calloc(1, sizeof *saves);
+    if (saves == NULL) {
+        cs2_set_error("out of memory for the save store");
+        return NULL;
+    }
+    saves->broker = broker;
+    return saves;
+}
+
 void cs2_saves_free(cs2_saves *saves) {
     free(saves);
 }
@@ -271,22 +288,31 @@ const char *cs2_saves_folder(const cs2_saves *saves) {
     return saves == NULL ? NULL : saves->folder;
 }
 
-/* One plain file name in the save folder: no separators, nothing above it. */
+/*
+ * A plain file name in the save folder -- no separators, nothing above it --
+ * validated but not yet turned into a real path: full_path does that for a
+ * real folder, and a broker resolves the bare name itself.
+ */
 static int named_path(const cs2_saves *saves, const char *name,
                       char *into, size_t into_size) {
     if (saves == NULL || name == NULL || name[0] == 0 || strcmp(name, ".") == 0
         || strcmp(name, "..") == 0 || strpbrk(name, "/\\") != NULL) {
         return -1;
     }
-    snprintf(into, into_size, "%s/%s", saves->folder, name);
+    snprintf(into, into_size, "%s", name);
     return 0;
 }
 
 /* The original's own name for a slot's file, so a folder reads the same way. */
 static int path_of(const cs2_saves *saves, int slot, char *into, size_t into_size) {
     if (saves == NULL || slot < 0 || slot >= SLOT_LIMIT) return -1;
-    snprintf(into, into_size, "%s/save%04d.dat", saves->folder, slot);
+    snprintf(into, into_size, "save%04d.dat", slot);
     return 0;
+}
+
+/* name, inside the real folder -- meaningless and unused for a broker store. */
+static void full_path(const cs2_saves *saves, const char *name, char *into, size_t into_size) {
+    snprintf(into, into_size, "%s/%s", saves->folder, name);
 }
 
 int cs2_saves_slot_of(const char *name) {
@@ -300,9 +326,19 @@ int cs2_saves_slot_of(const char *name) {
 }
 
 int cs2_saves_exists(const cs2_saves *saves, int slot) {
-    char path[600];
+    char name[600];
+    if (path_of(saves, slot, name, sizeof name) != 0) return 0;
+    if (saves->broker != NULL) {
+        int fd = saves->broker->open_read(saves->broker->ctx, name);
+        if (fd < 0) return 0;
+        struct stat info;
+        int ok = fstat(fd, &info) == 0 && info.st_size > MAGIC_BYTES;
+        close(fd);
+        return ok;
+    }
+    char path[620];
+    full_path(saves, name, path, sizeof path);
     struct stat info;
-    if (path_of(saves, slot, path, sizeof path) != 0) return 0;
     return stat(path, &info) == 0 && info.st_size > MAGIC_BYTES;
 }
 
@@ -311,13 +347,28 @@ int cs2_saves_exists(const cs2_saves *saves, int slot) {
  * a folder copied between devices keeps the game's own order that way.
  */
 static int64_t written_at(const cs2_saves *saves, int slot) {
-    char path[600];
-    if (path_of(saves, slot, path, sizeof path) != 0) return -1;
-    FILE *file = fopen(path, "rb");
-    if (file == NULL) return -1;
+    char name[600];
+    if (path_of(saves, slot, name, sizeof name) != 0) return -1;
     uint8_t head[MAGIC_BYTES + 8];
-    size_t got = fread(head, 1, sizeof head, file);
-    fclose(file);
+    size_t got;
+    if (saves->broker != NULL) {
+        int fd = saves->broker->open_read(saves->broker->ctx, name);
+        if (fd < 0) return -1;
+        FILE *file = fdopen(fd, "rb");
+        if (file == NULL) {
+            close(fd);
+            return -1;
+        }
+        got = fread(head, 1, sizeof head, file);
+        fclose(file);
+    } else {
+        char path[620];
+        full_path(saves, name, path, sizeof path);
+        FILE *file = fopen(path, "rb");
+        if (file == NULL) return -1;
+        got = fread(head, 1, sizeof head, file);
+        fclose(file);
+    }
     if (got != sizeof head || memcmp(head, MAGIC, MAGIC_BYTES) != 0) return -1;
     uint64_t when = (uint64_t) cs2_u32(head, sizeof head, MAGIC_BYTES)
                   | ((uint64_t) cs2_u32(head, sizeof head, MAGIC_BYTES + 4) << 32);
@@ -341,26 +392,26 @@ int cs2_saves_newest(const cs2_saves *saves, int from, int to) {
 }
 
 int cs2_saves_write(const cs2_saves *saves, int slot, const cs2_save *from) {
-    char path[600];
-    if (path_of(saves, slot, path, sizeof path) != 0) {
+    char slot_name[600];
+    if (path_of(saves, slot, slot_name, sizeof slot_name) != 0) {
         cs2_set_error("slot %d is not a save this game has", slot);
         return -1;
     }
-    return write_to(path, from);
+    return write_to(saves, slot_name, from);
 }
 
 int cs2_saves_write_named(const cs2_saves *saves, const char *name, const cs2_save *from) {
-    char path[600];
-    if (named_path(saves, name, path, sizeof path) != 0) {
+    char bare[600];
+    if (named_path(saves, name, bare, sizeof bare) != 0) {
         cs2_set_error("%s is not a name a save can have", name == NULL ? "" : name);
         return -1;
     }
-    return write_to(path, from);
+    return write_to(saves, bare, from);
 }
 
-static int write_to(const char *path, const cs2_save *from) {
+static int write_to(const cs2_saves *saves, const char *name, const cs2_save *from) {
     if (from == NULL) {
-        cs2_set_error("there is nothing to write to %s", path);
+        cs2_set_error("there is nothing to write to %s", name);
         return -1;
     }
 
@@ -408,8 +459,36 @@ static int write_to(const char *path, const cs2_save *from) {
     free(body.data);
     if (failed) {
         free(out.data);
-        cs2_set_error("out of memory writing %s", path);
+        cs2_set_error("out of memory writing %s", name);
         return -1;
+    }
+
+    if (saves->broker != NULL) {
+        int fd = saves->broker->open_write(saves->broker->ctx, name);
+        if (fd < 0) {
+            free(out.data);
+            cs2_set_error("%s cannot be written", name);
+            return -1;
+        }
+        FILE *file = fdopen(fd, "wb");
+        if (file == NULL) {
+            close(fd);
+            free(out.data);
+            cs2_set_error("%s cannot be written", name);
+            return -1;
+        }
+        size_t written = fwrite(out.data, 1, out.size, file);
+        int closed = fclose(file);
+        free(out.data);
+        if (written != out.size || closed != 0) {
+            cs2_set_error("%s was not written whole", name);
+            return -1;
+        }
+        if (saves->broker->commit_write(saves->broker->ctx, name) != 0) {
+            cs2_set_error("%s cannot be put in place", name);
+            return -1;
+        }
+        return 0;
     }
 
     /*
@@ -417,7 +496,9 @@ static int write_to(const char *path, const cs2_save *from) {
      * middle of a write like any other machine, and a half-written save that
      * replaced a good one is the one bug a save system must not have.
      */
-    char temporary[620];
+    char path[620];
+    full_path(saves, name, path, sizeof path);
+    char temporary[640];
     snprintf(temporary, sizeof temporary, "%s.new", path);
     FILE *file = fopen(temporary, "wb");
     if (file == NULL) {
@@ -443,33 +524,42 @@ static int write_to(const char *path, const cs2_save *from) {
 }
 
 int cs2_saves_read(const cs2_saves *saves, int slot, cs2_save *into) {
-    char path[600];
-    if (path_of(saves, slot, path, sizeof path) != 0) {
+    char slot_name[600];
+    if (path_of(saves, slot, slot_name, sizeof slot_name) != 0) {
         cs2_set_error("slot %d is not a save this game has", slot);
         return -1;
     }
-    return read_from(path, into);
+    return read_from(saves, slot_name, into);
 }
 
 int cs2_saves_read_named(const cs2_saves *saves, const char *name, cs2_save *into) {
-    char path[600];
-    if (named_path(saves, name, path, sizeof path) != 0) {
+    char bare[600];
+    if (named_path(saves, name, bare, sizeof bare) != 0) {
         cs2_set_error("%s is not a name a save can have", name == NULL ? "" : name);
         return -1;
     }
-    return read_from(path, into);
+    return read_from(saves, bare, into);
 }
 
-static int read_from(const char *path, cs2_save *into) {
+static int read_from(const cs2_saves *saves, const char *name, cs2_save *into) {
     if (into == NULL) {
-        cs2_set_error("there is nowhere to read %s into", path);
+        cs2_set_error("there is nowhere to read %s into", name);
         return -1;
     }
     cs2_bytes file = { 0 };
-    if (cs2_read_file(path, SAVE_BYTES, &file) != 0) return -1;
+    int got;
+    if (saves->broker != NULL) {
+        int fd = saves->broker->open_read(saves->broker->ctx, name);
+        got = fd < 0 ? -1 : cs2_read_file_fd(fd, SAVE_BYTES, &file);
+    } else {
+        char path[620];
+        full_path(saves, name, path, sizeof path);
+        got = cs2_read_file(path, SAVE_BYTES, &file);
+    }
+    if (got != 0) return -1;
     if (file.size < MAGIC_BYTES + 8 || memcmp(file.data, MAGIC, MAGIC_BYTES) != 0) {
         cs2_bytes_free(&file);
-        cs2_set_error("%s is not a save this engine wrote", path);
+        cs2_set_error("%s is not a save this engine wrote", name);
         return -1;
     }
 
@@ -519,15 +609,18 @@ static int read_from(const char *path, cs2_save *into) {
     cs2_bytes_free(&file);
     if (in.failed) {
         cs2_save_clear(into);
-        cs2_set_error("%s stops in the middle of itself", path);
+        cs2_set_error("%s stops in the middle of itself", name);
         return -1;
     }
     return 0;
 }
 
 int cs2_saves_delete(const cs2_saves *saves, int slot) {
-    char path[600];
-    if (path_of(saves, slot, path, sizeof path) != 0) return -1;
+    char name[600];
+    if (path_of(saves, slot, name, sizeof name) != 0) return -1;
+    if (saves->broker != NULL) return saves->broker->remove(saves->broker->ctx, name);
+    char path[620];
+    full_path(saves, name, path, sizeof path);
     return remove(path) == 0 ? 0 : -1;
 }
 
