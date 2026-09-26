@@ -6,6 +6,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.view.Choreographer;
 import android.view.InputDevice;
@@ -81,7 +82,12 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
             // host process over the broker instead of a real path. There is
             // no session.display() to attach a View into either -- see
             // step() below, which is how this plugin runs without one.
-            engine = nativeOpenIsolated(gameBroker, session.execFile(), session.host().saveBroker());
+            // The host owns real audio output (docs/engine-sandbox.md "Audio"):
+            // this process cannot reach AudioFlinger, so nativeOpenIsolated never
+            // touches AAudio and instead renders into the shared ring the host
+            // handed over, or plays silently when there is none.
+            engine = nativeOpenIsolated(gameBroker, session.execFile(), session.host().saveBroker(),
+                    session.host().isolatedAudioBuffer(), session.host().isolatedAudioSampleRate());
         } else {
             File saves = session.host().saveDirectory();
             if (saves != null && !saves.isDirectory()) saves.mkdirs();
@@ -371,7 +377,8 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
 
     private static native long nativeOpen(String gamePath, String script, String saveFolder);
     /** Sandbox layer 2 (docs/engine-sandbox.md): gameBroker/saveBroker take the place of gamePath/saveFolder. */
-    private static native long nativeOpenIsolated(EngineFileBroker gameBroker, String script, EngineFileBroker saveBroker);
+    private static native long nativeOpenIsolated(EngineFileBroker gameBroker, String script, EngineFileBroker saveBroker,
+            ParcelFileDescriptor audioBuffer, int audioSampleRate);
     private static native void nativeClose(long engine);
     private static native void nativeSetSounding(long engine, boolean sounding);
     private static native String nativeError();

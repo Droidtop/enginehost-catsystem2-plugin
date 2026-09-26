@@ -14,10 +14,14 @@
  * than a scene script picked for it, and the frame loop is the game's own sixty
  * a second rather than one picture per tap.
  */
+#include <errno.h>
 #include <jni.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <aaudio/AAudio.h>
@@ -37,6 +41,25 @@
 
 #define TAG "catsystem2"
 #define INSTRUCTION_BUDGET 2000000
+
+/*
+ * The isolated launch's audio ring (docs/engine-sandbox.md "Audio"): an
+ * isolated process cannot reach AudioFlinger to open its own output at
+ * all, so a game running isolated never opens AAudio here. Instead this
+ * file renders into a plain shared-memory ring the host reads from and
+ * plays on a real AudioTrack it owns -- the same layout as
+ * dev.enginehost.EngineHost#isolatedAudioBuffer's own doc comment and
+ * IsolatedRuntimeHost.kt's IsolatedAudioBridge on the host side: a
+ * 16-byte header (write position, read position, capacity, reserved,
+ * each little-endian uint32) followed by AUDIO_RING_CAPACITY bytes of
+ * ring data. This side only ever advances the write position; the host
+ * only ever advances the read position.
+ */
+#define AUDIO_HEADER_SIZE 16
+#define AUDIO_RING_CAPACITY (32 * 1024)
+/* One chunk is 1024 stereo 16-bit frames -- 4096 bytes, the same size the
+   host's own consumer thread reads in one pass. */
+#define AUDIO_CHUNK_FRAMES 1024
 
 /* The engine writes whole lines; logcat takes whole lines. */
 static void to_logcat(const char *line, void *context) {
@@ -87,6 +110,17 @@ typedef struct {
     jni_broker *save_broker;
     cs2_broker game_broker_ops;
     cs2_broker save_broker_ops;
+    /*
+     * The isolated launch's audio ring, and the thread that renders into
+     * it. Non-NULL/running only when nativeOpenIsolated was handed a real
+     * host-side buffer; an isolated launch with none simply plays
+     * silently rather than touching AAudio, which would hang.
+     */
+    void *audio_ring;
+    size_t audio_ring_size;
+    int audio_ring_fd;
+    pthread_t audio_thread;
+    volatile int audio_thread_running;
 } session;
 
 
@@ -318,11 +352,108 @@ static void open_sound(session *state) {
                         cs2_audio_rate(state->audio));
 }
 
+/*
+ * The isolated launch's audio producer, running on its own thread: mixes
+ * one chunk at a time and copies it into the shared ring, backing off
+ * briefly when the host has not read enough of the last chunk yet. The
+ * write position is the only thing this thread touches in the header;
+ * the host's read position is only ever read here.
+ */
+static void *audio_produce(void *arg) {
+    session *state = (session *) arg;
+    uint8_t *ring = (uint8_t *) state->audio_ring;
+    _Atomic uint32_t *write_pos = (_Atomic uint32_t *) (ring + 0);
+    _Atomic uint32_t *read_pos = (_Atomic uint32_t *) (ring + 4);
+    int16_t chunk[AUDIO_CHUNK_FRAMES * 2];
+    size_t needed = sizeof chunk;
+    while (state->audio_thread_running) {
+        uint32_t w = atomic_load_explicit(write_pos, memory_order_relaxed);
+        uint32_t r = atomic_load_explicit(read_pos, memory_order_acquire);
+        uint32_t used = w - r;
+        uint32_t free_bytes = (uint32_t) AUDIO_RING_CAPACITY - used;
+        if (free_bytes < needed) {
+            usleep(5000);
+            continue;
+        }
+        cs2_audio_mix(state->audio, chunk, AUDIO_CHUNK_FRAMES);
+        uint32_t start = w % (uint32_t) AUDIO_RING_CAPACITY;
+        if ((size_t) start + needed <= (size_t) AUDIO_RING_CAPACITY) {
+            memcpy(ring + AUDIO_HEADER_SIZE + start, chunk, needed);
+        } else {
+            size_t first = (size_t) AUDIO_RING_CAPACITY - start;
+            memcpy(ring + AUDIO_HEADER_SIZE + start, chunk, first);
+            memcpy(ring + AUDIO_HEADER_SIZE, (const uint8_t *) chunk + first, needed - first);
+        }
+        atomic_store_explicit(write_pos, w + (uint32_t) needed, memory_order_release);
+    }
+    return NULL;
+}
+
+/*
+ * Sound for an isolated launch: no AAudio at all, since this process
+ * cannot reach AudioFlinger to open it (dq-sandbox-03 found that hangs
+ * forever rather than failing). audio_fd is a host-owned SharedMemory
+ * region, already sized and zeroed by IsolatedRuntimeHost's
+ * IsolatedAudioBridge; -1 means the host itself could not set one up, in
+ * which case the game plays silently rather than touching AAudio.
+ */
+static void open_sound_bridged(session *state, int audio_fd, int sample_rate) {
+    if (audio_fd < 0 || sample_rate <= 0) {
+        __android_log_print(ANDROID_LOG_WARN, TAG,
+            "no sound: the host had no isolated audio buffer to hand over");
+        return;
+    }
+    size_t map_size = AUDIO_HEADER_SIZE + AUDIO_RING_CAPACITY;
+    void *ring = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, audio_fd, 0);
+    if (ring == MAP_FAILED) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "no sound: mmap of the audio buffer failed (%s)", strerror(errno));
+        close(audio_fd);
+        return;
+    }
+    state->audio = cs2_audio_new(state->files, sample_rate);
+    if (state->audio == NULL) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "no sound: %s", cs2_error());
+        munmap(ring, map_size);
+        close(audio_fd);
+        return;
+    }
+    cs2_system_set_audio(state->system, state->audio);
+    state->audio_ring = ring;
+    state->audio_ring_size = map_size;
+    state->audio_ring_fd = audio_fd;
+    state->audio_thread_running = 1;
+    if (pthread_create(&state->audio_thread, NULL, audio_produce, state) != 0) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "no sound: could not start the audio thread");
+        state->audio_thread_running = 0;
+        cs2_system_set_audio(state->system, NULL);
+        cs2_audio_free(state->audio);
+        state->audio = NULL;
+        munmap(ring, map_size);
+        close(audio_fd);
+        state->audio_ring = NULL;
+        state->audio_ring_fd = -1;
+        return;
+    }
+    __android_log_print(ANDROID_LOG_INFO, TAG, "sound at %d Hz, bridged to the host", sample_rate);
+}
+
 static void close_sound(session *state) {
     if (state->sound != NULL) {
         AAudioStream_requestStop(state->sound);
         AAudioStream_close(state->sound);
         state->sound = NULL;
+    }
+    if (state->audio_thread_running) {
+        state->audio_thread_running = 0;
+        pthread_join(state->audio_thread, NULL);
+    }
+    if (state->audio_ring != NULL) {
+        munmap(state->audio_ring, state->audio_ring_size);
+        state->audio_ring = NULL;
+    }
+    if (state->audio_ring_fd >= 0) {
+        close(state->audio_ring_fd);
+        state->audio_ring_fd = -1;
     }
     cs2_system_set_audio(state->system, NULL);
     cs2_audio_free(state->audio);
@@ -366,7 +497,8 @@ static int screen_size(const cs2_startup *startup, const char *key, int fallback
  * mechanism, not two.
  */
 static jlong finish_open(JNIEnv *env, session *state, const char *wanted,
-                         const char *save_folder, const cs2_broker *save_broker) {
+                         const char *save_folder, const cs2_broker *save_broker,
+                         int isolated, int audio_fd, int audio_rate) {
     const cs2_game_key *key = cs2_files_key(state->files);
     if (key->found) {
         __android_log_print(ANDROID_LOG_INFO, TAG,
@@ -431,7 +563,8 @@ static jlong finish_open(JNIEnv *env, session *state, const char *wanted,
     state->running = 1;
     __android_log_print(ANDROID_LOG_INFO, TAG, "the game boots into %s", path);
 
-    open_sound(state);
+    if (isolated) open_sound_bridged(state, audio_fd, audio_rate);
+    else open_sound(state);
     return (jlong) (intptr_t) state;
 
 failed:
@@ -466,12 +599,13 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
         cs2_set_error("out of memory");
         __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
     } else {
+        state->audio_ring_fd = -1; /* calloc leaves 0, which is a real fd (stdin) */
         state->files = cs2_files_open(root);
         if (state->files == NULL) {
             __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
             close_session(env, state);
         } else {
-            handle = finish_open(env, state, wanted, saves, NULL);
+            handle = finish_open(env, state, wanted, saves, NULL, /*isolated=*/0, /*audio_fd=*/-1, /*audio_rate=*/0);
         }
     }
     (*env)->ReleaseStringUTFChars(env, game_path, root);
@@ -484,12 +618,14 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen(
  * Sandbox layer 2 (docs/engine-sandbox.md), first milestone: the same open,
  * with the game folder and the save folder each a host-brokered
  * EngineFileBroker instead of a real path -- this process, under
- * android:isolatedProcess, cannot resolve either path itself.
+ * android:isolatedProcess, cannot resolve either path itself. audio_buffer
+ * is the host's shared ring (docs/engine-sandbox.md "Audio"), or null when
+ * the host could not make one; either way this never opens AAudio itself.
  */
 JNIEXPORT jlong JNICALL
 Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpenIsolated(
         JNIEnv *env, jclass type, jobject game_broker, jstring wanted_script,
-        jobject save_broker) {
+        jobject save_broker, jobject audio_buffer, jint audio_sample_rate) {
     (void) type;
     const char *wanted = wanted_script == NULL
         ? NULL : (*env)->GetStringUTFChars(env, wanted_script, NULL);
@@ -502,6 +638,7 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpenIsolated(
         cs2_set_error("out of memory");
         __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", cs2_error());
     } else {
+        state->audio_ring_fd = -1; /* calloc leaves 0, which is a real fd (stdin) */
         state->game_broker = jni_broker_create(env, game_broker);
         if (state->game_broker == NULL) {
             cs2_set_error("no host file broker for the game folder");
@@ -522,7 +659,10 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpenIsolated(
                         save_ops = &state->save_broker_ops;
                     }
                 }
-                handle = finish_open(env, state, wanted, NULL, save_ops);
+                /* Takes and closes the Java-side ParcelFileDescriptor; -1 when there was none. */
+                int audio_fd = jni_pfd_take(env, audio_buffer);
+                handle = finish_open(env, state, wanted, NULL, save_ops,
+                                     /*isolated=*/1, audio_fd, (int) audio_sample_rate);
             }
         }
     }
