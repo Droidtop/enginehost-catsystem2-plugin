@@ -17,6 +17,7 @@ import dev.enginehost.api.EngineControllerEvent;
 import dev.enginehost.api.EngineFileBroker;
 import dev.enginehost.api.EnginePlugin;
 import dev.enginehost.api.EnginePluginSession;
+import dev.enginehost.api.EngineProcess;
 import dev.enginehost.api.EngineStepDriven;
 import java.io.File;
 import java.io.IOException;
@@ -51,7 +52,19 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
             // so a failure here means something real -- a missing or
             // broken .so -- and must not be hidden behind a confusing
             // later failure the way silently swallowing it here would.
-            if (!isIsolatedProcess()) throw e;
+            //
+            // dq-sandbox-11: this repo's own process-name check here used
+            // to be its own private isIsolatedProcess(), and got the
+            // isolated-service naming on API 34 wrong the same way
+            // Enginehost's own host-side check independently did
+            // ("pkg:runtime_isolated" is not a suffix of what Android
+            // actually names an isolated SERVICE's process there --
+            // "pkg:runtime_isolated:pkg.IsolatedRuntimeService", the
+            // service's own component appended after a second colon).
+            // EngineProcess.isIsolated() is plugin-api's one canonical
+            // answer to this, shared by the host and every plugin, so
+            // this mistake only ever needs fixing in one place.
+            if (!EngineProcess.isIsolated()) throw e;
         }
     }
 
@@ -407,24 +420,4 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
     private static native void nativePointer(long engine, int x, int y);
     private static native void nativeKey(long engine, int key);
 
-    /**
-     * Whether this is the isolated ":runtime_isolated" process (matches
-     * EnginehostApplication's own check on the host side; this plugin
-     * has no dependency on Enginehost's own app code to share it with,
-     * so it reads the same information the same way instead of adding
-     * one). Only used to decide whether a missing loadLibrary above is
-     * expected or a real problem -- not part of this plugin's own
-     * runtime behaviour otherwise.
-     */
-    private static boolean isIsolatedProcess() {
-        try {
-            byte[] bytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get("/proc/self/cmdline"));
-            String name = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
-            int nul = name.indexOf('\0');
-            if (nul >= 0) name = name.substring(0, nul);
-            return name.endsWith(":runtime_isolated");
-        } catch (java.io.IOException e) {
-            return false;
-        }
-    }
 }
