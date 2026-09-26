@@ -867,3 +867,53 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeKey(
     default: break;
     }
 }
+
+/*
+ * Sandbox layer 2, isolated launches only (docs/engine-sandbox.md
+ * "Audio", the InMemoryDexClassLoader pivot): under Android 14's
+ * "safer dynamic code loading", ART refuses a path-based dex file this
+ * process itself made even sealed non-writable (dq-sandbox-09 confirmed
+ * this directly -- the seal is not what the check inspects). The host
+ * loads this plugin's dex via InMemoryDexClassLoader instead, which is
+ * `final` and cannot override findLibrary the way the in-process path's
+ * loader does, so this library's own native methods are never
+ * auto-bound there and the static initialiser's own
+ * System.loadLibrary("catsystem2") always fails under isolation
+ * (caught and ignored, CatSystem2Plugin.java).
+ *
+ * IsolatedRuntimeService dlopens this library directly (a /proc/self/fd
+ * path to the same host-verified .so every other launch shape uses) and
+ * dlsyms this EXACT, fixed, non-JNI symbol name -- not
+ * Java_..._nativeOpen-style, so the JVM never tries to auto-bind it --
+ * calling it once with a JNIEnv and this plugin's own Class object,
+ * already correctly resolved by ordinary Java reflection on the host's
+ * side. No FindClass, no classloader ambiguity: RegisterNatives binds
+ * these exact, already-linked function pointers to that jclass directly,
+ * regardless of which classloader loaded this library or defined that
+ * class. Every one of this plugin's own native methods is listed here,
+ * once, so nothing needs a second declaration to stay in sync as they
+ * change -- the addresses are the same functions this file already
+ * defines for the ordinary JNI auto-binding path.
+ */
+JNIEXPORT void JNICALL
+enginehost_register_natives(JNIEnv *env, jclass clazz) {
+    static const JNINativeMethod methods[] = {
+        {"nativeOpen", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)J",
+         (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpen},
+        {"nativeOpenIsolated",
+         "(Ldev/enginehost/api/EngineFileBroker;Ljava/lang/String;Ldev/enginehost/api/EngineFileBroker;"
+         "Landroid/os/ParcelFileDescriptor;I)J",
+         (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeOpenIsolated},
+        {"nativeClose", "(J)V", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeClose},
+        {"nativeSetSounding", "(JZ)V", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeSetSounding},
+        {"nativeError", "()Ljava/lang/String;", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeError},
+        {"nativeWidth", "(J)I", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeWidth},
+        {"nativeHeight", "(J)I", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeHeight},
+        {"nativeStep", "(J)Z", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeStep},
+        {"nativeFrame", "(J[I)I", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeFrame},
+        {"nativeTouch", "(JII)V", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeTouch},
+        {"nativePointer", "(JII)V", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativePointer},
+        {"nativeKey", "(JI)V", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeKey},
+    };
+    (*env)->RegisterNatives(env, clazz, methods, (jint) (sizeof(methods) / sizeof(methods[0])));
+}
