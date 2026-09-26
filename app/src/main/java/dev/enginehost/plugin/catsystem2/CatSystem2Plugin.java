@@ -39,19 +39,19 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
         try {
             System.loadLibrary("catsystem2");
         } catch (UnsatisfiedLinkError e) {
-            // Sandbox layer 2, isolated launches (docs/engine-sandbox.md
-            // "Audio"): under Android 14's "safer dynamic code loading",
-            // a path-based dex file this process itself made (even
-            // sealed non-writable) is still refused by ART, so the
-            // isolated side loads its dex via InMemoryDexClassLoader
-            // instead -- a loader that, being final, cannot override
-            // findLibrary the way the in-process path's loader does.
-            // loadLibrary always fails here as a result; harmless to
-            // swallow, since IsolatedRuntimeService loads and binds this
-            // library explicitly (dlopen + a single RegisterNatives
-            // call, see enginehost_register_natives in jni.c) before
-            // this class is ever instantiated, regardless of whether
-            // this block's own attempt succeeded.
+            // Sandbox layer 2, isolated launches ONLY (docs/engine-sandbox.md
+            // "Audio"): InMemoryDexClassLoader is final and cannot
+            // override findLibrary the way the in-process path's loader
+            // does, so loadLibrary always fails here under isolation --
+            // harmless there, since IsolatedRuntimeService binds this
+            // library's native methods explicitly instead (dlopen + a
+            // single RegisterNatives call, see enginehost_register_natives
+            // below) before this class is ever instantiated. A normal,
+            // in-process launch's loader DOES have a working findLibrary,
+            // so a failure here means something real -- a missing or
+            // broken .so -- and must not be hidden behind a confusing
+            // later failure the way silently swallowing it here would.
+            if (!isIsolatedProcess()) throw e;
         }
     }
 
@@ -406,4 +406,25 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
     private static native void nativeTouch(long engine, int x, int y);
     private static native void nativePointer(long engine, int x, int y);
     private static native void nativeKey(long engine, int key);
+
+    /**
+     * Whether this is the isolated ":runtime_isolated" process (matches
+     * EnginehostApplication's own check on the host side; this plugin
+     * has no dependency on Enginehost's own app code to share it with,
+     * so it reads the same information the same way instead of adding
+     * one). Only used to decide whether a missing loadLibrary above is
+     * expected or a real problem -- not part of this plugin's own
+     * runtime behaviour otherwise.
+     */
+    private static boolean isIsolatedProcess() {
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get("/proc/self/cmdline"));
+            String name = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+            int nul = name.indexOf('\0');
+            if (nul >= 0) name = name.substring(0, nul);
+            return name.endsWith(":runtime_isolated");
+        } catch (java.io.IOException e) {
+            return false;
+        }
+    }
 }
