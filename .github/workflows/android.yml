@@ -326,6 +326,10 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
+          bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
+          id="$(basename "$bundle" .enginehost.tar.xz)"
+          envelope="$(find release -name 'enginehost-release.json' -print -quit)"
+          keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
           build-scripts/publish-history-release.sh "$id" "$RUN_NUMBER" "$SHA" "$REF_NAME" "$bundle" "$envelope" ${keydoc:+"$keydoc"}
 
       - name: Ask droidtop-platforms to reindex
