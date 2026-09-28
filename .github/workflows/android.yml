@@ -108,6 +108,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: build-scripts
+          persist-credentials: false
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: enginehost-catsystem2-cst-v1
@@ -171,6 +176,29 @@ jobs:
               --title "$id ($CHANNEL)" $prerelease --notes "$notes"
           fi
 
+      - name: Publish this build's permanent history release
+        # A promotion can build a commit the push job never saw (a manual
+        # dispatch on an older ref), so this promotion is its own chance to
+        # record permanent history (Droidtop/tracker#122), same as the
+        # unstable job's every-push copy of this step. A no-op if that push
+        # already created it.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
+          if [ -z "$bundle" ]; then
+            exit 0
+          fi
+          id="$(basename "$bundle" .enginehost.tar.xz)"
+          envelope="$(find release -name 'enginehost-release.json' -print -quit)"
+          keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
+          build-scripts/publish-history-release.sh "$id" "$RUN_NUMBER" "$SHA" "$REF_NAME" "$bundle" "$envelope" ${keydoc:+"$keydoc"}
+
       - name: Ask droidtop-platforms to reindex
         env:
           # Enginehost reads droidtop-platforms' plugins/index.json before it
@@ -203,6 +231,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: build-scripts
+          persist-credentials: false
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: enginehost-catsystem2-cst-v1
@@ -265,6 +298,21 @@ jobs:
               --target "$SHA" \
               --title "$id ($CHANNEL)" $prerelease --notes "$notes"
           fi
+
+      - name: Publish this build's permanent history release
+        # The unstable release above is a moving pointer (Droidtop/tracker#122):
+        # each push replaces it, so it is not history. This is the record that
+        # a given bundle version ever existed, never overwritten except by a
+        # rerun of this exact workflow run.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          build-scripts/publish-history-release.sh "$id" "$RUN_NUMBER" "$SHA" "$REF_NAME" "$bundle" "$envelope" ${keydoc:+"$keydoc"}
 
       - name: Ask droidtop-platforms to reindex
         env:
