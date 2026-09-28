@@ -96,6 +96,7 @@ jobs:
           REQUESTED_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::SHA must be a full commit hash, got \'$SHA\'; refusing to create a release with an unpinned target" >&2; exit 1; }
           # No artifact at all (a branch whose build makes no bundle) means no
           # release directory either; that is "nothing to publish", not an error.
           mkdir -p release
@@ -187,6 +188,7 @@ jobs:
           REQUESTED_TAG: ""
         run: |
           set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::SHA must be a full commit hash, got \'$SHA\'; refusing to create a release with an unpinned target" >&2; exit 1; }
           # No artifact at all (a branch whose build makes no bundle) means no
           # release directory either; that is "nothing to publish", not an error.
           mkdir -p release
