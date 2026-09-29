@@ -104,12 +104,38 @@ jobs:
     secrets:
       ENGINEHOST_SIGNING_KEY_PEM: ${{ secrets.ENGINEHOST_SIGNING_KEY_PEM }}
 
+  verify:
+    # The ABI contract (Droidtop/tracker#39) is about the artifact a person
+    # installs, so it is checked on the signed bundle itself, not only on
+    # the unpacked build tree: a bundle missing either ABI's libcatsystem2.so
+    # fails the run here instead of reaching a release and then failing to
+    # load on an x86_64 emulator.
+    needs: sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: enginehost-catsystem2-cst-v1
+          path: bundle
+      - name: Fail unless the signed bundle carries both ABIs
+        run: |
+          set -euo pipefail
+          bundle="$(find bundle -name '*.enginehost.tar.xz' -print -quit)"
+          test -n "$bundle"
+          # Payload files are stored at their payload-relative paths.
+          for abi in arm64-v8a x86_64; do
+            tar -tJf "$bundle" | grep -x "lib/$abi/libcatsystem2.so" \
+              || { echo "::error::$bundle is missing lib/$abi/libcatsystem2.so" >&2; exit 1; }
+          done
+
   publish:
     # Promotion is deliberate: a manual dispatch names the channel. Stable
     # means used with real games on hardware; testing means it runs games
     # but has not been lived with. Enginehost offers each person the channel
     # they chose in Settings and every steadier one.
-    needs: sign
+    needs: verify
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
@@ -232,7 +258,7 @@ jobs:
     # the unstable channel, replacing the previous one, so a person who opted
     # into unstable in Enginehost sees each build the moment CI is done with
     # it. Branches whose build makes no bundle publish nothing.
-    needs: sign
+    needs: verify
     if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     permissions:
