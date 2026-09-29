@@ -101,9 +101,9 @@ jobs:
     needs: bundle
     permissions:
       contents: read
-    uses: Droidtop/enginehost/.github/workflows/sign-engine-bundle.yml@749433c7e8ae2e5571a97cdbfdbf2d3ad2d4d2fc
+    uses: Droidtop/enginehost/.github/workflows/sign-engine-bundle.yml@a8a6270dbfe0e7bd475c6d8209e9615960a8c0d7
     with:
-      tooling-sha: 749433c7e8ae2e5571a97cdbfdbf2d3ad2d4d2fc
+      tooling-sha: a8a6270dbfe0e7bd475c6d8209e9615960a8c0d7
       unsigned-artifact: enginehost-catsystem2-cst-v1-unsigned
       bundle: dev.enginehost.catsystem2.cst.v1.enginehost.tar.xz
       artifact-name: enginehost-catsystem2-cst-v1
