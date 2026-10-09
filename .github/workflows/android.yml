@@ -101,9 +101,9 @@ jobs:
     needs: bundle
     permissions:
       contents: read
-    uses: Droidtop/enginehost/.github/workflows/sign-engine-bundle.yml@a8a6270dbfe0e7bd475c6d8209e9615960a8c0d7
+    uses: Droidtop/enginehost/.github/workflows/sign-engine-bundle.yml@f26c8161cc25de6743bd11f99d9f5879205a710a
     with:
-      tooling-sha: a8a6270dbfe0e7bd475c6d8209e9615960a8c0d7
+      tooling-sha: f26c8161cc25de6743bd11f99d9f5879205a710a
       unsigned-artifact: enginehost-catsystem2-cst-v1-unsigned
       bundle: dev.enginehost.catsystem2.cst.v1.enginehost.tar.xz
       artifact-name: enginehost-catsystem2-cst-v1
@@ -115,240 +115,35 @@ jobs:
     # Promotion is deliberate: a manual dispatch names the channel. Stable
     # means used with real games on hardware; testing means it runs games
     # but has not been lived with. Enginehost offers each person the channel
-    # they chose in Settings and every steadier one.
+    # they chose in Settings and every steadier one. The release logic lives
+    # once, in Droidtop/enginehost (Droidtop/tracker#196).
     needs: sign
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
-    runs-on: ubuntu-latest
     permissions:
       contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          sparse-checkout: build-scripts
-          persist-credentials: false
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: enginehost-catsystem2-cst-v1
-          path: release
-      - name: Publish the signed bundle on the chosen channel
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          REF_NAME: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
-          RUN_NUMBER: ${{ github.run_number }}
-          CHANNEL: ${{ inputs.channel }}
-          REQUESTED_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::SHA must be a full commit hash, got \'$SHA\'; refusing to create a release with an unpinned target" >&2; exit 1; }
-          # No artifact at all (a branch whose build makes no bundle) means no
-          # release directory either; that is "nothing to publish", not an error.
-          mkdir -p release
-          bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
-          if [ -z "$bundle" ]; then
-            echo "This branch's build produced no signed bundle; nothing to publish."
-            exit 0
-          fi
-          id="$(basename "$bundle" .enginehost.tar.xz)"
-          envelope="$(find release -name 'enginehost-release.json' -print -quit)"
-          keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
-          test -f "$envelope"
-          # The envelope names its channel; the app filters on it. The signed
-          # manifest inside is untouched.
-          python3 - "$envelope" "$CHANNEL" <<'PY'
-          import json, sys
-          path, channel = sys.argv[1], sys.argv[2]
-          data = json.load(open(path))
-          data["channel"] = channel
-          json.dump(data, open(path, "w"), indent=2)
-          PY
-          tag="$REQUESTED_TAG"
-          if [ -z "$tag" ]; then
-            tag="$(printf '%s' "$id" | sed 's/^dev\.enginehost\.//; s/\./-/g')"
-          fi
-          case "$CHANNEL" in
-            stable) prerelease="" ;;
-            testing) [[ "$tag" == *-testing ]] || tag="$tag-testing"; prerelease="--prerelease" ;;
-            unstable) [[ "$tag" == *-unstable ]] || tag="$tag-unstable"; prerelease="--prerelease" ;;
-            *) echo "unknown channel $CHANNEL" >&2; exit 1 ;;
-          esac
-          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`$REF_NAME\` at \`$SHA\` (build $RUN_NUMBER). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
-          if [ "$CHANNEL" = unstable ] || [ "$CHANNEL" = testing ]; then
-            # Rolling: the newest green build of the line is the whole release.
-            gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
-            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --target "$SHA" \
-              --title "$id ($CHANNEL)" $prerelease --notes "$notes"
-          elif gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} --clobber
-            gh release edit "$tag" --notes "$notes"
-          else
-            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --target "$SHA" \
-              --title "$id ($CHANNEL)" $prerelease --notes "$notes"
-          fi
-
-      - name: Publish this build's permanent history release
-        # A promotion can build a commit the push job never saw (a manual
-        # dispatch on an older ref), so this promotion is its own chance to
-        # record permanent history (Droidtop/tracker#122), same as the
-        # unstable job's every-push copy of this step. A no-op if that push
-        # already created it.
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          REF_NAME: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
-          RUN_NUMBER: ${{ github.run_number }}
-        run: |
-          set -euo pipefail
-          bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
-          if [ -z "$bundle" ]; then
-            exit 0
-          fi
-          id="$(basename "$bundle" .enginehost.tar.xz)"
-          envelope="$(find release -name 'enginehost-release.json' -print -quit)"
-          keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
-          build-scripts/publish-history-release.sh "$id" "$RUN_NUMBER" "$SHA" "$REF_NAME" "$bundle" "$envelope" ${keydoc:+"$keydoc"}
-
-      - name: Ask droidtop-platforms to reindex
-        env:
-          # Enginehost reads droidtop-platforms' plugins/index.json before it
-          # asks GitHub's API anything, so a release is only offered once that
-          # index knows about it. A cross-repository dispatch needs a token of
-          # its own; this job's GITHUB_TOKEN cannot reach another repository.
-          # Without the secret this is a no-op and the index's scheduled run
-          # picks the release up within hours. See droidtop-platforms
-          # plugins/README.md.
-          GH_TOKEN: ${{ secrets.PLATFORMS_DISPATCH_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "No PLATFORMS_DISPATCH_TOKEN; the plugins index picks this release up on its schedule."
-            exit 0
-          fi
-          gh api repos/Droidtop/droidtop-platforms/dispatches \
-            -f event_type=plugin-published \
-            -f "client_payload[repo]=$GH_REPO"
+    uses: Droidtop/enginehost/.github/workflows/publish-engine-bundle.yml@f26c8161cc25de6743bd11f99d9f5879205a710a
+    with:
+      tooling-sha: f26c8161cc25de6743bd11f99d9f5879205a710a
+      artifact-name: enginehost-catsystem2-cst-v1
+      channel: ${{ inputs.channel }}
+      tag: ${{ inputs.tag }}
+    secrets:
+      PLATFORMS_DISPATCH_TOKEN: ${{ secrets.PLATFORMS_DISPATCH_TOKEN }}
 
   unstable:
     # Every green push that produced a signed bundle is published as-is on
     # the unstable channel, replacing the previous one, so a person who opted
     # into unstable in Enginehost sees each build the moment CI is done with
-    # it. Branches whose build makes no bundle publish nothing.
+    # it, and the build also gets its permanent history release. Branches
+    # whose build makes no bundle publish nothing.
     needs: sign
     if: ${{ github.event_name == 'push' }}
-    runs-on: ubuntu-latest
     permissions:
       contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          sparse-checkout: build-scripts
-          persist-credentials: false
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: enginehost-catsystem2-cst-v1
-          path: release
-      - name: Publish the signed bundle on the unstable channel
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          REF_NAME: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
-          RUN_NUMBER: ${{ github.run_number }}
-          CHANNEL: unstable
-          REQUESTED_TAG: ""
-        run: |
-          set -euo pipefail
-          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::SHA must be a full commit hash, got \'$SHA\'; refusing to create a release with an unpinned target" >&2; exit 1; }
-          # No artifact at all (a branch whose build makes no bundle) means no
-          # release directory either; that is "nothing to publish", not an error.
-          mkdir -p release
-          bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
-          if [ -z "$bundle" ]; then
-            echo "This branch's build produced no signed bundle; nothing to publish."
-            exit 0
-          fi
-          id="$(basename "$bundle" .enginehost.tar.xz)"
-          envelope="$(find release -name 'enginehost-release.json' -print -quit)"
-          keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
-          test -f "$envelope"
-          # The envelope names its channel; the app filters on it. The signed
-          # manifest inside is untouched.
-          python3 - "$envelope" "$CHANNEL" <<'PY'
-          import json, sys
-          path, channel = sys.argv[1], sys.argv[2]
-          data = json.load(open(path))
-          data["channel"] = channel
-          json.dump(data, open(path, "w"), indent=2)
-          PY
-          tag="$REQUESTED_TAG"
-          if [ -z "$tag" ]; then
-            tag="$(printf '%s' "$id" | sed 's/^dev\.enginehost\.//; s/\./-/g')"
-          fi
-          case "$CHANNEL" in
-            stable) prerelease="" ;;
-            testing) [[ "$tag" == *-testing ]] || tag="$tag-testing"; prerelease="--prerelease" ;;
-            unstable) [[ "$tag" == *-unstable ]] || tag="$tag-unstable"; prerelease="--prerelease" ;;
-            *) echo "unknown channel $CHANNEL" >&2; exit 1 ;;
-          esac
-          notes="Signed Enginehost bundle \`$id\` on the **$CHANNEL** channel, built from \`$REF_NAME\` at \`$SHA\` (build $RUN_NUMBER). Install it through Enginehost rather than unpacking it by hand: the bundle is verified file by file at install time against the key pinned for this repository."
-          if [ "$CHANNEL" = unstable ]; then
-            # Rolling: the newest green build of the line is the whole release.
-            gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
-            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --target "$SHA" \
-              --title "$id (unstable)" $prerelease --notes "$notes"
-          elif gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} --clobber
-            gh release edit "$tag" --notes "$notes"
-          else
-            gh release create "$tag" "$bundle" "$envelope" ${keydoc:+"$keydoc"} \
-              --target "$SHA" \
-              --title "$id ($CHANNEL)" $prerelease --notes "$notes"
-          fi
-
-      - name: Publish this build's permanent history release
-        # The unstable release above is a moving pointer (Droidtop/tracker#122):
-        # each push replaces it, so it is not history. This is the record that
-        # a given bundle version ever existed, never overwritten except by a
-        # rerun of this exact workflow run.
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          REF_NAME: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
-          RUN_NUMBER: ${{ github.run_number }}
-        run: |
-          set -euo pipefail
-          bundle="$(find release -name '*.enginehost.tar.xz' -print -quit)"
-          id="$(basename "$bundle" .enginehost.tar.xz)"
-          envelope="$(find release -name 'enginehost-release.json' -print -quit)"
-          keydoc="$(find release -name 'enginehost-public-key.json' -print -quit)"
-          build-scripts/publish-history-release.sh "$id" "$RUN_NUMBER" "$SHA" "$REF_NAME" "$bundle" "$envelope" ${keydoc:+"$keydoc"}
-
-      - name: Ask droidtop-platforms to reindex
-        env:
-          # Enginehost reads droidtop-platforms' plugins/index.json before it
-          # asks GitHub's API anything, so a release is only offered once that
-          # index knows about it. A cross-repository dispatch needs a token of
-          # its own; this job's GITHUB_TOKEN cannot reach another repository.
-          # Without the secret this is a no-op and the index's scheduled run
-          # picks the release up within hours. See droidtop-platforms
-          # plugins/README.md.
-          GH_TOKEN: ${{ secrets.PLATFORMS_DISPATCH_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "No PLATFORMS_DISPATCH_TOKEN; the plugins index picks this release up on its schedule."
-            exit 0
-          fi
-          gh api repos/Droidtop/droidtop-platforms/dispatches \
-            -f event_type=plugin-published \
-            -f "client_payload[repo]=$GH_REPO"
+    uses: Droidtop/enginehost/.github/workflows/publish-engine-bundle.yml@f26c8161cc25de6743bd11f99d9f5879205a710a
+    with:
+      tooling-sha: f26c8161cc25de6743bd11f99d9f5879205a710a
+      artifact-name: enginehost-catsystem2-cst-v1
+      channel: unstable
+    secrets:
+      PLATFORMS_DISPATCH_TOKEN: ${{ secrets.PLATFORMS_DISPATCH_TOKEN }}
