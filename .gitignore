@@ -1,3 +1,6 @@
+bin/
+*.o
+*.d
 /.gradle/
 /app/build/
 /local.properties

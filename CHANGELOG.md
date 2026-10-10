@@ -15,6 +15,25 @@ release of its own (`<bundle>-build.<run>`), which is never overwritten.
   to any channel, so a version that was once installable stays that way in
   the release history even after the next push moves the channel pointers.
 
+## [1.0.1] - 2026-09-29
+
+### Changed
+
+- Declared version raised to 1.0.1 (stable channel) so the next publish is
+  1.0.1-1, which orders above every legacy `X.Y.<run>` build already published
+  (Enginehost reads those as `X.Y.0-<run>`). No republish; the change takes
+  effect on the next build.
+
+## [1.0.0] - 2026-09-28
+
+### Changed
+
+- Promoted to the stable channel at version 1.0.0. The maintainer's decision of
+  2026-09-28 promotes every plugin line that has already run a real game
+  from testing, without the usual promotion checks. CI stamps its run
+  number as the third component of the published version (1.0.<run>), so
+  every build stays newer than the one before it.
+
 ## [0.1] - 2026-09-26
 
 This is the plugin's first version-history entry: there was no changelog
