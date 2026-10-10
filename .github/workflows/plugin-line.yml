@@ -1,0 +1,17 @@
+name: Plugin line
+
+# A line is exactly its upstream commit + plugin-core, both pinned in
+# enginehost/line.json (Droidtop/tracker#324). The check lives once, in
+# Droidtop/droidtop-platforms, pinned by commit; tool-ref names the same commit.
+on:
+  push:
+    branches: [plugin-core, "plugin/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  line:
+    uses: Droidtop/droidtop-platforms/.github/workflows/plugin-line-check.yml@7125a1de351ee8e6e4d01c34d4c8e6b2309a693a
+    with:
+      tool-ref: 7125a1de351ee8e6e4d01c34d4c8e6b2309a693a
