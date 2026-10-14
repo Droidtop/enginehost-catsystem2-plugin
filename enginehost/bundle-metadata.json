@@ -24,7 +24,7 @@
     "revision": "main"
   },
   "licenses": [
-    "MIT",
+    "GPL-3.0",
     "Public Domain (stb_truetype)"
   ]
 }
