@@ -35,6 +35,10 @@ of the game's entry point, and `--list <archive>` prints an archive's contents.
 The Android plugin is a separate branch that compiles these same sources and
 adds nothing to them; see the enginehost plugin repository's `plugin-core`.
 
+## Licence
+
+GPL-3.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). All code here is ours; the third-party attributions in NOTICE and THIRD_PARTY.md keep their own notices.
+
 ## Attribution
 
 The formats were worked out with the help of the public documentation in
