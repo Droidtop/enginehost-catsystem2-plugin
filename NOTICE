@@ -1,0 +1,9 @@
+CatSystem2 engine and Android plugin
+Copyright the Enginehost contributors. Licensed under the GNU General Public License, version 3 (LICENSE).
+
+The engine is written from the documented file formats; no CatSystem2 or other engine source is included.
+Research attribution: TriggersTools.CatSystem2 (MIT), documentation only, see THIRD_PARTY.md.
+
+Vendored unchanged under third_party/: stb_truetype.h and stb_vorbis.c, Sean Barrett, public domain or MIT
+at the user's option (each file carries its own notice). SDL2 (zlib licence) is used by the desktop
+frontend and is not vendored.
