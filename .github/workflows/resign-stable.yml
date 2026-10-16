@@ -23,9 +23,9 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
-    uses: Droidtop/enginehost/.github/workflows/resign-engine-release.yml@96d25415cdb5d8ec31e1a0c0b6e64061cdf3dd1f
+    uses: Droidtop/enginehost/.github/workflows/resign-engine-release.yml@cfde2656de97d55708a483302bf752bef89078d5
     with:
-      tooling-sha: 96d25415cdb5d8ec31e1a0c0b6e64061cdf3dd1f
+      tooling-sha: cfde2656de97d55708a483302bf752bef89078d5
       source-tag: ${{ inputs.source-tag }}
     secrets:
       ENGINEHOST_CERTIFICATE_KEY_PEM: ${{ secrets.ENGINEHOST_CERTIFICATE_KEY_PEM }}
