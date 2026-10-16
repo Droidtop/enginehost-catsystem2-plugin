@@ -117,13 +117,20 @@ static int has_suffix(const char *name, const char *suffix) {
 void cs2_game_key_read(const char *game_root, cs2_game_key *out) {
     memset(out, 0, sizeof *out);
     static const char *suffixes[] = { ".bin", ".exe", ".dll" };
+    /* On the heap: 512 x 512 bytes (256 KB) on the stack is a quarter of the
+       1 MB binder thread a sandboxed runtime steps on, the pattern that
+       overflowed CMVS's (Droidtop/tracker#558). */
+    char (*names)[512] = malloc(512 * sizeof *names);
+    if (names == NULL) return;
     for (size_t s = 0; s < sizeof suffixes / sizeof suffixes[0]; s++) {
         /* Sorted by name inside each suffix, so the choice does not depend on
            the order the file system happens to hand the folder over in. */
-        char names[512][512];
         size_t count = 0;
         DIR *directory = opendir(game_root);
-        if (directory == NULL) return;
+        if (directory == NULL) {
+            free(names);
+            return;
+        }
         for (struct dirent *item; (item = readdir(directory)) != NULL && count < 512; ) {
             if (has_suffix(item->d_name, suffixes[s])) {
                 snprintf(names[count], sizeof names[count], "%s", item->d_name);
@@ -144,9 +151,13 @@ void cs2_game_key_read(const char *game_root, cs2_game_key *out) {
         for (size_t i = 0; i < count; i++) {
             char path[2048];
             if (snprintf(path, sizeof path, "%s/%s", game_root, names[i]) >= (int) sizeof path) continue;
-            if (key_from_binary(path, out) == 0) return;
+            if (key_from_binary(path, out) == 0) {
+                free(names);
+                return;
+            }
         }
     }
+    free(names);
 }
 
 /* Same search, over a host broker's listing instead of opendir/fopen (docs/engine-sandbox.md). */
@@ -154,16 +165,23 @@ void cs2_game_key_read_via_broker(const cs2_broker *broker, cs2_game_key *out) {
     memset(out, 0, sizeof *out);
     static const char *suffixes[] = { ".bin", ".exe", ".dll" };
     char (*all)[256] = malloc(CS2_BROKER_LIST_MAX * sizeof *all);
-    if (all == NULL) return;
+    /* 512 x 256 bytes (128 KB), on the heap for the same reason as above:
+       this is the path a sandboxed runtime takes, on a 1 MB binder thread. */
+    char (*names)[256] = malloc(512 * sizeof *names);
+    if (all == NULL || names == NULL) {
+        free(all);
+        free(names);
+        return;
+    }
     int total = broker->list(broker->ctx, "", all, CS2_BROKER_LIST_MAX);
     if (total < 0) {
         free(all);
+        free(names);
         return;
     }
     for (size_t s = 0; s < sizeof suffixes / sizeof suffixes[0]; s++) {
         /* Sorted by name inside each suffix, so the choice does not depend
            on the order the broker's own listing happens to arrive in. */
-        char names[512][256];
         size_t count = 0;
         for (int i = 0; i < total && count < 512; i++) {
             if (has_suffix(all[i], suffixes[s])) {
@@ -186,11 +204,13 @@ void cs2_game_key_read_via_broker(const cs2_broker *broker, cs2_game_key *out) {
             if (fd < 0) continue;
             if (key_from_binary_fd(fd, names[i], out) == 0) {
                 free(all);
+                free(names);
                 return;
             }
         }
     }
     free(all);
+    free(names);
 }
 
 /*
