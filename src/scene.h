@@ -75,6 +75,13 @@ void cs2_scene_seek(cs2_scene *scene, size_t cursor);
 const char *cs2_scene_path(const cs2_scene *scene);
 const char *cs2_scene_speaker(const cs2_scene *scene);
 const char *cs2_scene_text(const cs2_scene *scene);
+
+/*
+ * Shows [text] (UTF-8) in place of the message on the screen, until the
+ * scenario puts up the next one: the message box draws it, the script goes on
+ * as before. For a host that prints a translation in the game's own box.
+ */
+void cs2_scene_show_text(cs2_scene *scene, const char *text);
 size_t cs2_scene_cursor(const cs2_scene *scene);
 int cs2_scene_ended(const cs2_scene *scene);
 

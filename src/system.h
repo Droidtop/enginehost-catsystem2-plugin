@@ -104,6 +104,14 @@ typedef struct {
 void cs2_system_set_text_listener(cs2_system *system, const cs2_text_listener *listener, void *context);
 
 /*
+ * Shows [text] in place of the message the listener was last told about, if
+ * that message is still the one on the screen ([script] and [word] name it, as
+ * the listener had them). A translation that arrives after the reader has gone
+ * on is dropped, so it can never land on the wrong line.
+ */
+void cs2_system_show_text(cs2_system *system, const char *script, size_t word, const char *text);
+
+/*
  * The layouts the started planes are running: the game's own front end, the
  * logo and the title screen and what they lead to, and over them the message
  * window a scene is read in. They are in the order they were started, which is

@@ -555,6 +555,11 @@ void cs2_scene_seek(cs2_scene *scene, size_t cursor) {
 
 const char *cs2_scene_path(const cs2_scene *scene) { return scene->path; }
 const char *cs2_scene_speaker(const cs2_scene *scene) { return scene->speaker; }
+void cs2_scene_show_text(cs2_scene *scene, const char *text) {
+    if (scene == NULL || text == NULL || scene->ended) return;
+    set_message(scene, text);
+}
+
 const char *cs2_scene_text(const cs2_scene *scene) {
     return scene->message == NULL ? "" : scene->message;
 }
