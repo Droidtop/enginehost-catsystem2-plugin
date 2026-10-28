@@ -1,0 +1,32 @@
+name: Re-sign a stable release
+
+# Re-signs one published stable release in signature format v1 and publishes
+# it beside the original as <tag>-resigned (Droidtop/tracker#550). The code is
+# unchanged; see Enginehost's .github/workflows/resign-engine-release.yml.
+on:
+  # Only so GitHub registers this dispatch-only workflow, which it does on a
+  # workflow's first event; a push run does nothing (the job is skipped).
+  push:
+    branches: [plugin-core]
+    paths: [.github/workflows/resign-stable.yml]
+  workflow_dispatch:
+    inputs:
+      source-tag:
+        description: The published stable release to re-sign
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  resign:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    uses: Droidtop/enginehost/.github/workflows/resign-engine-release.yml@cfde2656de97d55708a483302bf752bef89078d5
+    with:
+      tooling-sha: cfde2656de97d55708a483302bf752bef89078d5
+      source-tag: ${{ inputs.source-tag }}
+    secrets:
+      ENGINEHOST_CERTIFICATE_KEY_PEM: ${{ secrets.ENGINEHOST_CERTIFICATE_KEY_PEM }}
+      PLATFORMS_DISPATCH_TOKEN: ${{ secrets.PLATFORMS_DISPATCH_TOKEN }}
