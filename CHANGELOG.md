@@ -11,9 +11,16 @@ release of its own (`<bundle>-build.<run>`), which is never overwritten.
 
 ### Added
 
+- The reader's text goes to Enginehost: each message with its speaker (none for narration), each
+  new scene, and each time the reader goes on, in Enginehost's ehtext/1 format, for Enginehost to
+  read aloud and translate. On an older Enginehost nothing is sent.
 - A permanent, never-overwritten release for every bundle build published
   to any channel, so a version that was once installable stays that way in
   the release history even after the next push moves the channel pointers.
+
+### Fixed
+
+- A narrated message after a spoken one no longer shows the previous speaker's name.
 
 ## [1.0.1] - 2026-09-29
 

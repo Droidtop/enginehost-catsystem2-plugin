@@ -21,6 +21,7 @@ import dev.enginehost.api.EngineProcess;
 import dev.enginehost.api.EngineStepDriven;
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 
 /**
  * The Android wrapper around the CatSystem2 engine.
@@ -90,6 +91,11 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
      * the other carries the pad, never both, so a press is never counted twice.
      */
     private boolean hostSendsThePad;
+    /*
+     * Whether the host takes the reader's text. False after a host too old to
+     * know EngineHost.emitText turns the first event away; nothing is sent again.
+     */
+    private boolean sendsText = true;
     /* The left stick, as the pointer's speed: -1 to 1 on each axis. */
     private float pointerAcross;
     private float pointerDown;
@@ -124,6 +130,9 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
                                 saves == null ? null : saves.getAbsolutePath());
         }
         if (engine == 0) throw new IOException(nativeError());
+        // What the reader is shown goes to Enginehost, which reads it aloud and
+        // translates it (Droidtop/tracker#490); the engine calls text() below.
+        nativeListenText(engine, this);
         if (session.display() != null) {
             view = new ScreenView();
             session.display().addView(view, new android.view.ViewGroup.LayoutParams(-1, -1));
@@ -404,6 +413,21 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
         private int hatDown;
     }
 
+    /**
+     * One ehtext/1 event about the reader's text (Enginehost docs/text-services.md), as
+     * UTF-8 bytes, from the engine's text listener (jni.c). Called on the thread that is
+     * stepping or touching the engine.
+     */
+    @SuppressWarnings("unused") // called from jni.c
+    private void text(byte[] event) {
+        if (!sendsText || session == null) return;
+        try {
+            session.host().emitText(new String(event, StandardCharsets.UTF_8));
+        } catch (IncompatibleClassChangeError olderHost) {
+            sendsText = false;
+        }
+    }
+
     private static native long nativeOpen(String gamePath, String script, String saveFolder);
     /** Sandbox layer 2 (docs/engine-sandbox.md): gameBroker/saveBroker take the place of gamePath/saveFolder. */
     private static native long nativeOpenIsolated(EngineFileBroker gameBroker, String script, EngineFileBroker saveBroker,
@@ -419,5 +443,7 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
     private static native void nativeTouch(long engine, int x, int y);
     private static native void nativePointer(long engine, int x, int y);
     private static native void nativeKey(long engine, int key);
+    /** Has the engine report the reader's text to {@code plugin}'s text(byte[]). */
+    private static native void nativeListenText(long engine, Object plugin);
 
 }
