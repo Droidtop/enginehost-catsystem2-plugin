@@ -11,4 +11,5 @@ public interface EngineHost {
     void log(int priority, String tag, String message, Throwable error);
     boolean rumbleController(int deviceId, long durationMs, int amplitude); void finish();
     default void emitText(String event) {}
+    default String replaceText(String event) { return null; }
 }
