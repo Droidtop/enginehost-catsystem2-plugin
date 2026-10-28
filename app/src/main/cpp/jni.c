@@ -104,7 +104,21 @@ typedef struct {
     char script[160];           /* the script last told, so a change is a scene */
     char line[200];             /* the message on the screen, for advance */
     unsigned long seq;
+    /*
+     * The message on the screen, for printing its translation in the game's
+     * own box (EngineHost.replaceText): its event, and the script and word
+     * that name it. Asked about every REPLACE_EVERY frames, at most
+     * REPLACE_TRIES times, then dropped.
+     */
+    jmethodID replacement;
+    char *asking;
+    char asking_script[160];
+    size_t asking_word;
+    int tries;
 } jni_text;
+
+#define REPLACE_EVERY 15
+#define REPLACE_TRIES 80
 
 typedef struct {
     cs2_files *files;
@@ -144,6 +158,8 @@ typedef struct {
     /* Who the reader's text goes to, once the plugin asks (nativeListenText). */
     jni_text *text;
 } session;
+
+static void text_poll(JNIEnv *env, session *state);
 
 
 /*
@@ -504,6 +520,7 @@ static void close_session(JNIEnv *env, session *state) {
     jni_broker_free(env, state->save_broker);
     if (state->text != NULL) {
         (*env)->DeleteGlobalRef(env, state->text->plugin);
+        free(state->text->asking);
         free(state->text);
     }
     free(state);
@@ -756,6 +773,7 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeStep(
         return JNI_FALSE;
     }
     cs2_system_frame(state->system);
+    text_poll(env, state);
     if (running == 0 || cs2_system_finished(state->system)) {
         __android_log_print(ANDROID_LOG_INFO, TAG, "the game has ended");
         state->running = 0;
@@ -996,7 +1014,52 @@ static void text_line(void *context, const char *script, size_t word, const char
     json_text(&out, ",\"text\":");
     json_string(&out, message);
     json_text(&out, ",\"window\":\"adv\"}");
+    // Kept to ask for its translation while it is on the screen (text_poll).
+    free(text->asking);
+    text->asking = out.failed || out.data == NULL ? NULL : strdup(out.data);
+    snprintf(text->asking_script, sizeof text->asking_script, "%s", script);
+    text->asking_word = word;
+    text->tries = 0;
     text_send(text, &out);
+}
+
+/*
+ * Asks Enginehost, from the stepping thread, whether the message on the
+ * screen has its translation yet, and prints it in the game's own box when it
+ * has (the owner: translations are handed "back to the engine to print").
+ * The answer is immediate; until there is one, the original stays.
+ */
+static void text_poll(JNIEnv *env, session *state) {
+    jni_text *text = state->text;
+    if (text == NULL || text->asking == NULL || text->replacement == NULL) return;
+    if (text->tries++ % REPLACE_EVERY != 0) return;
+    if (text->tries > REPLACE_EVERY * REPLACE_TRIES) {
+        free(text->asking);
+        text->asking = NULL;
+        return;
+    }
+    size_t length = strlen(text->asking);
+    jbyteArray event = (*env)->NewByteArray(env, (jsize) length);
+    if (event == NULL) return;
+    (*env)->SetByteArrayRegion(env, event, 0, (jsize) length, (const jbyte *) text->asking);
+    jbyteArray answer = (jbyteArray) (*env)->CallObjectMethod(env, text->plugin, text->replacement, event);
+    (*env)->DeleteLocalRef(env, event);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        return;
+    }
+    if (answer == NULL) return;
+    jsize size = (*env)->GetArrayLength(env, answer);
+    char *translated = malloc((size_t) size + 1);
+    if (translated != NULL) {
+        (*env)->GetByteArrayRegion(env, answer, 0, size, (jbyte *) translated);
+        translated[size] = '\0';
+        cs2_system_show_text(state->system, text->asking_script, text->asking_word, translated);
+        free(translated);
+    }
+    (*env)->DeleteLocalRef(env, answer);
+    free(text->asking);
+    text->asking = NULL;
 }
 
 static void text_moved_on(void *context) {
@@ -1023,6 +1086,12 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeListenText(
     if (text == NULL) return;
     jclass plugin_class = (*env)->GetObjectClass(env, plugin);
     text->text = (*env)->GetMethodID(env, plugin_class, "text", "([B)V");
+    // Optional: a plugin without it prints the original, as before.
+    text->replacement = (*env)->GetMethodID(env, plugin_class, "replacement", "([B)[B");
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        text->replacement = NULL;
+    }
     (*env)->DeleteLocalRef(env, plugin_class);
     if (text->text == NULL || (*env)->GetJavaVM(env, &text->vm) != JNI_OK) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);

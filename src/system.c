@@ -481,6 +481,13 @@ void cs2_system_set_text_listener(cs2_system *system, const cs2_text_listener *l
     system->text_context = context;
 }
 
+void cs2_system_show_text(cs2_system *system, const char *script, size_t word, const char *text) {
+    if (system == NULL || script == NULL || text == NULL || !system->scene_loaded) return;
+    const char *shown = cs2_scene_path(system->scene);
+    if (shown == NULL || strcmp(shown, script) != 0 || cs2_scene_cursor(system->scene) != word) return;
+    cs2_scene_show_text(system->scene, text);
+}
+
 /* Tells the listener about the message the scenario has just put up, once. */
 static void tell_message(cs2_system *system) {
     if (system->text.line == NULL || cs2_scene_ended(system->scene)) return;

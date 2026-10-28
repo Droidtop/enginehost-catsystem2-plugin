@@ -428,6 +428,26 @@ public final class CatSystem2Plugin implements EnginePlugin, EngineStepDriven {
         }
     }
 
+    /**
+     * The translated text of a message event the engine has on the screen (UTF-8), or null to
+     * keep the original: EngineHost.replaceText, which answers at once from what Enginehost
+     * already holds. Called by jni.c's text_poll a few times a second until there is an answer.
+     */
+    @SuppressWarnings("unused") // called from jni.c
+    private byte[] replacement(byte[] event) {
+        if (!sendsText || session == null) return null;
+        try {
+            String replaced = session.host().replaceText(new String(event, StandardCharsets.UTF_8));
+            if (replaced == null) return null;
+            String text = new org.json.JSONObject(replaced).optString("text", "");
+            return text.isEmpty() ? null : text.getBytes(StandardCharsets.UTF_8);
+        } catch (IncompatibleClassChangeError olderHost) {
+            return null;
+        } catch (org.json.JSONException malformed) {
+            return null;
+        }
+    }
+
     private static native long nativeOpen(String gamePath, String script, String saveFolder);
     /** Sandbox layer 2 (docs/engine-sandbox.md): gameBroker/saveBroker take the place of gamePath/saveFolder. */
     private static native long nativeOpenIsolated(EngineFileBroker gameBroker, String script, EngineFileBroker saveBroker,
