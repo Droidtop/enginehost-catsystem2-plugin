@@ -500,12 +500,18 @@ static char *append_line(char *message, const char *addition) {
 
 void cs2_scene_advance(cs2_scene *scene) {
     char *message = NULL;
+    /*
+     * A name belongs to the message it comes before. A message with none is
+     * narration, so it must not keep the name of the line before it.
+     */
+    int named = 0;
     while (scene->cursor < cs2_cst_word_count(scene->script)) {
         cs2_cst_word line = cs2_cst_word_at(scene->script, scene->cursor++);
         if (line.type == CS2_CST_NAME) {
             char *shown = cs2_text_display(scene->text, line.text);
             if (shown != NULL) {
                 snprintf(scene->speaker, sizeof scene->speaker, "%s", shown);
+                named = 1;
                 free(shown);
             }
         } else if (line.type == CS2_CST_MESSAGE) {
@@ -516,6 +522,7 @@ void cs2_scene_advance(cs2_scene *scene) {
             }
         } else if (line.type == CS2_CST_INPUT || line.type == CS2_CST_PAGE) {
             if (message != NULL && message[0] != '\0') {
+                if (!named) scene->speaker[0] = '\0';
                 set_message(scene, message);
                 free(message);
                 scene->ended = 0;

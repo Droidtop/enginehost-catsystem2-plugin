@@ -88,6 +88,22 @@ void cs2_system_set_save_broker(cs2_system *system, const cs2_broker *broker);
 void cs2_system_set_audio(cs2_system *system, cs2_audio *audio);
 
 /*
+ * What the reader is shown, for a host that reads it aloud or translates it
+ * (Enginehost docs/text-services.md). line is called once for each message the
+ * scenario puts on the screen: the script it is in, the word it ends at (which
+ * with the script names the message for good), the speaker ("" for narration)
+ * and the text, all UTF-8 and valid only during the call. moved_on is called
+ * when the reader asks to go on from a message. Either may be NULL; a NULL
+ * listener tells nobody, which is what the desktop runner does.
+ */
+typedef struct {
+    void (*line)(void *context, const char *script, size_t word, const char *speaker, const char *text);
+    void (*moved_on)(void *context);
+} cs2_text_listener;
+
+void cs2_system_set_text_listener(cs2_system *system, const cs2_text_listener *listener, void *context);
+
+/*
  * The layouts the started planes are running: the game's own front end, the
  * logo and the title screen and what they lead to, and over them the message
  * window a scene is read in. They are in the order they were started, which is

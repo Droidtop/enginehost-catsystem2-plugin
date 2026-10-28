@@ -86,6 +86,26 @@ typedef struct {
     jmethodID delete_method;
 } jni_broker;
 
+/*
+ * The text the reader is shown, for Enginehost to read aloud and translate
+ * (Enginehost docs/text-services.md). The engine's two callbacks
+ * (cs2_text_listener) become ehtext/1 events, and each goes to the plugin's
+ * text(byte[]), which hands it to EngineHost.emitText. The event crosses as
+ * UTF-8 bytes: the engine's text is real UTF-8, and NewStringUTF wants JNI's
+ * modified UTF-8, which differs for every character past U+FFFF.
+ *
+ * The callbacks run inside nativeStep, nativeTouch or nativeKey, so the thread
+ * is always one Java is already calling from: GetEnv finds it attached.
+ */
+typedef struct {
+    JavaVM *vm;
+    jobject plugin;             /* global ref */
+    jmethodID text;
+    char script[160];           /* the script last told, so a change is a scene */
+    char line[200];             /* the message on the screen, for advance */
+    unsigned long seq;
+} jni_text;
+
 typedef struct {
     cs2_files *files;
     cs2_startup *startup;
@@ -121,6 +141,8 @@ typedef struct {
     int audio_ring_fd;
     pthread_t audio_thread;
     volatile int audio_thread_running;
+    /* Who the reader's text goes to, once the plugin asks (nativeListenText). */
+    jni_text *text;
 } session;
 
 
@@ -480,6 +502,10 @@ static void close_session(JNIEnv *env, session *state) {
        fds/FILE*s that already came from one. */
     jni_broker_free(env, state->game_broker);
     jni_broker_free(env, state->save_broker);
+    if (state->text != NULL) {
+        (*env)->DeleteGlobalRef(env, state->text->plugin);
+        free(state->text);
+    }
     free(state);
 }
 
@@ -868,6 +894,150 @@ Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeKey(
     }
 }
 
+/* A JSON event being built: grows as it is written, and remembers running out. */
+typedef struct {
+    char *data;
+    size_t used, size;
+    int failed;
+} json_out;
+
+static void json_raw(json_out *out, const char *text, size_t length) {
+    if (out->failed) return;
+    if (out->used + length + 1 > out->size) {
+        size_t size = out->size == 0 ? 512 : out->size;
+        while (out->used + length + 1 > size) size *= 2;
+        char *grown = realloc(out->data, size);
+        if (grown == NULL) {
+            out->failed = 1;
+            return;
+        }
+        out->data = grown;
+        out->size = size;
+    }
+    memcpy(out->data + out->used, text, length);
+    out->used += length;
+    out->data[out->used] = '\0';
+}
+
+static void json_text(json_out *out, const char *text) {
+    json_raw(out, text, strlen(text));
+}
+
+/* A JSON string: quotes, backslashes and control characters escaped, UTF-8 passed as it is. */
+static void json_string(json_out *out, const char *value) {
+    json_raw(out, "\"", 1);
+    for (const unsigned char *c = (const unsigned char *) value; *c != 0; c++) {
+        if (*c == '"' || *c == '\\') {
+            char escaped[2] = {'\\', (char) *c};
+            json_raw(out, escaped, 2);
+        } else if (*c == '\n') {
+            json_raw(out, "\\n", 2);
+        } else if (*c < 0x20) {
+            char escaped[8];
+            snprintf(escaped, sizeof escaped, "\\u%04x", *c);
+            json_raw(out, escaped, 6);
+        } else {
+            json_raw(out, (const char *) c, 1);
+        }
+    }
+    json_raw(out, "\"", 1);
+}
+
+/* Hands one finished event to the plugin's text(byte[]). */
+static void text_send(jni_text *text, json_out *out) {
+    if (out->failed || out->data == NULL) {
+        free(out->data);
+        return;
+    }
+    JNIEnv *env = NULL;
+    if ((*text->vm)->GetEnv(text->vm, (void **) &env, JNI_VERSION_1_6) == JNI_OK) {
+        jbyteArray bytes = (*env)->NewByteArray(env, (jsize) out->used);
+        if (bytes != NULL) {
+            (*env)->SetByteArrayRegion(env, bytes, 0, (jsize) out->used, (const jbyte *) out->data);
+            (*env)->CallVoidMethod(env, text->plugin, text->text, bytes);
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            (*env)->DeleteLocalRef(env, bytes);
+        }
+    }
+    free(out->data);
+}
+
+/*
+ * A message on the screen. Its id is the script and the word it ends at, which
+ * name it for good: a save, a load or a second reading tells the same id.
+ * CatSystem2 names a speaker by the name shown, so that is the speaker's id.
+ */
+static void text_line(void *context, const char *script, size_t word, const char *speaker, const char *message) {
+    jni_text *text = context;
+    if (strcmp(text->script, script) != 0) {
+        snprintf(text->script, sizeof text->script, "%s", script);
+        json_out scene = {0};
+        json_text(&scene, "{\"v\":1,\"t\":\"scene\",\"id\":");
+        json_string(&scene, script);
+        json_text(&scene, "}");
+        text_send(text, &scene);
+    }
+    snprintf(text->line, sizeof text->line, "%s:%zu", script, word);
+    char number[32];
+    json_out out = {0};
+    json_text(&out, "{\"v\":1,\"t\":\"line\",\"id\":");
+    json_string(&out, text->line);
+    snprintf(number, sizeof number, ",\"seq\":%lu", ++text->seq);
+    json_text(&out, number);
+    if (speaker != NULL && speaker[0] != '\0') {
+        json_text(&out, ",\"kind\":\"dialogue\",\"speaker\":{\"id\":");
+        json_string(&out, speaker);
+        json_text(&out, ",\"name\":");
+        json_string(&out, speaker);
+        json_text(&out, "}");
+    } else {
+        json_text(&out, ",\"kind\":\"narration\"");
+    }
+    json_text(&out, ",\"text\":");
+    json_string(&out, message);
+    json_text(&out, ",\"window\":\"adv\"}");
+    text_send(text, &out);
+}
+
+static void text_moved_on(void *context) {
+    jni_text *text = context;
+    if (text->line[0] == '\0') return;
+    json_out out = {0};
+    json_text(&out, "{\"v\":1,\"t\":\"advance\",\"id\":");
+    json_string(&out, text->line);
+    json_text(&out, "}");
+    text_send(text, &out);
+}
+
+/*
+ * The plugin asks for the reader's text, once, after the open. Its
+ * text(byte[]) receives every event; the first is the hello.
+ */
+JNIEXPORT void JNICALL
+Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeListenText(
+        JNIEnv *env, jclass type, jlong handle, jobject plugin) {
+    (void) type;
+    session *state = from_handle(handle);
+    if (state == NULL || state->text != NULL || plugin == NULL) return;
+    jni_text *text = calloc(1, sizeof *text);
+    if (text == NULL) return;
+    jclass plugin_class = (*env)->GetObjectClass(env, plugin);
+    text->text = (*env)->GetMethodID(env, plugin_class, "text", "([B)V");
+    (*env)->DeleteLocalRef(env, plugin_class);
+    if (text->text == NULL || (*env)->GetJavaVM(env, &text->vm) != JNI_OK) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        free(text);
+        return;
+    }
+    text->plugin = (*env)->NewGlobalRef(env, plugin);
+    state->text = text;
+    static const cs2_text_listener listener = {text_line, text_moved_on};
+    cs2_system_set_text_listener(state->system, &listener, text);
+    json_out hello = {0};
+    json_text(&hello, "{\"v\":1,\"t\":\"hello\",\"engine\":\"catsystem2\",\"markup\":\"none\"}");
+    text_send(text, &hello);
+}
+
 /*
  * Sandbox layer 2, isolated launches only (docs/engine-sandbox.md
  * "Audio", the InMemoryDexClassLoader pivot): under Android 14's
@@ -914,6 +1084,8 @@ enginehost_register_natives(JNIEnv *env, jclass clazz) {
         {"nativeTouch", "(JII)V", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeTouch},
         {"nativePointer", "(JII)V", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativePointer},
         {"nativeKey", "(JI)V", (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeKey},
+        {"nativeListenText", "(JLjava/lang/Object;)V",
+         (void *) Java_dev_enginehost_plugin_catsystem2_CatSystem2Plugin_nativeListenText},
     };
     (*env)->RegisterNatives(env, clazz, methods, (jint) (sizeof(methods) / sizeof(methods[0])));
 }

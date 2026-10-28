@@ -2,7 +2,7 @@
   "upstream": {
     "repo": "Droidtop/enginehost-catsystem2-plugin",
     "ref": "engine/0.1",
-    "commit": "8014211b2e31d2154a8bd989509df242a7a61293",
+    "commit": "e1dabc5bf5120067a434cf0e1be66b57962d7654",
     "basedOn": "Droidtop/enginehost-catsystem2-plugin d310c2c5e2301fbc453532351e94d12ae5333b0f (main d310c2c)"
   },
   "version": "0.1"

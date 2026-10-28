@@ -80,6 +80,11 @@ struct cs2_system {
     cs2_files *files;
     cs2_pictures *pictures;
     cs2_audio *audio;            /* the mixer 936 plays through, or NULL */
+    cs2_text_listener text;      /* who is told what the reader is shown */
+    void *text_context;
+    char text_script[160];       /* the message last told, so each is told once */
+    size_t text_word;
+    int text_told;
     /*
      * The voices the script is holding. The game's own engine answers 936
      * with a pointer to the sound it started and the script keeps that in its
@@ -322,7 +327,9 @@ void cs2_system_free(cs2_system *system) {
  */
 void cs2_system_event(cs2_system *system, uint32_t event) {
     (void) event;
-    if (system->scene_loaded) system->scene_step = 1;
+    if (!system->scene_loaded) return;
+    system->scene_step = 1;
+    if (system->text_told && system->text.moved_on != NULL) system->text.moved_on(system->text_context);
 }
 
 /*
@@ -462,6 +469,31 @@ void cs2_system_set_audio(cs2_system *system, cs2_audio *audio) {
     if (system == NULL) return;
     system->audio = audio;
     cs2_scene_set_audio(system->scene, audio);
+}
+
+void cs2_system_set_text_listener(cs2_system *system, const cs2_text_listener *listener, void *context) {
+    if (system == NULL) return;
+    if (listener == NULL) {
+        memset(&system->text, 0, sizeof system->text);
+    } else {
+        system->text = *listener;
+    }
+    system->text_context = context;
+}
+
+/* Tells the listener about the message the scenario has just put up, once. */
+static void tell_message(cs2_system *system) {
+    if (system->text.line == NULL || cs2_scene_ended(system->scene)) return;
+    const char *text = cs2_scene_text(system->scene);
+    if (text == NULL || text[0] == '\0') return;
+    const char *script = cs2_scene_path(system->scene);
+    size_t word = cs2_scene_cursor(system->scene);
+    if (script == NULL) script = "";
+    if (system->text_told && system->text_word == word && strcmp(system->text_script, script) == 0) return;
+    snprintf(system->text_script, sizeof system->text_script, "%s", script);
+    system->text_word = word;
+    system->text_told = 1;
+    system->text.line(system->text_context, script, word, cs2_scene_speaker(system->scene), text);
 }
 
 void cs2_system_set_boot(cs2_system *system, int type, const char *scenario) {
@@ -2015,6 +2047,7 @@ int cs2_system_gcall(void *context, cs2_kcs *script, uint32_t id,
         if (system->scene_loaded && system->scene_step) {
             system->scene_step = 0;
             cs2_scene_advance(system->scene);
+            tell_message(system);
             const char *skipped = cs2_scene_take_skipped(system->scene);
             if (skipped[0] != 0) {
                 cs2_log("%s: commands not carried out yet: %s", cs2_kcs_name(script), skipped);
