@@ -579,36 +579,107 @@ static uint32_t stored_value(uint8_t flags, uint32_t value) {
 
 /* ------------------------------------------------------------ the opcodes */
 
+/*
+ * The 63 opcodes, by the byte that is each one in the code: the one table of
+ * their numbers, which step's switch, the arithmetic and the compound
+ * assignments all go by.
+ */
+enum {
+    OP_NOP               = 0x00,
+    OP_ADD               = 0x01,
+    OP_SUB               = 0x02,
+    OP_MUL               = 0x03,
+    OP_DIV               = 0x04,
+    OP_MOD               = 0x05,
+    OP_AND               = 0x06,
+    OP_OR                = 0x07,
+    OP_NOT               = 0x08,  /* bitwise */
+    OP_XOR               = 0x09,
+    OP_SHL               = 0x0A,
+    OP_SHR               = 0x0B,
+    OP_LOGICAL_NOT       = 0x0C,
+    OP_LOGICAL_AND       = 0x0D,
+    OP_LOGICAL_OR        = 0x0E,
+    OP_GT                = 0x0F,
+    OP_LT                = 0x10,
+    OP_GE                = 0x11,
+    OP_LE                = 0x12,
+    OP_EQ                = 0x13,
+    OP_NE                = 0x14,
+    OP_STORE             = 0x15,  /* =, as an expression */
+    OP_PRE_INC           = 0x16,
+    OP_PRE_DEC           = 0x17,
+    OP_POST_INC          = 0x18,
+    OP_POST_DEC          = 0x19,
+    OP_NEGATE            = 0x1A,
+    OP_MOD_ASSIGN        = 0x1B,
+    OP_AND_ASSIGN        = 0x1C,
+    OP_MUL_ASSIGN        = 0x1D,
+    OP_ADD_ASSIGN        = 0x1E,
+    OP_SUB_ASSIGN        = 0x1F,
+    OP_DIV_ASSIGN        = 0x20,
+    OP_SHL_ASSIGN        = 0x21,
+    OP_SHR_ASSIGN        = 0x22,
+    OP_XOR_ASSIGN        = 0x23,
+    OP_OR_ASSIGN         = 0x24,
+    OP_PUSH              = 0x25,
+    OP_ASSIGN            = 0x26,  /* =, as a statement */
+    OP_JUMP_ZERO         = 0x27,
+    OP_JUMP_NOT_ZERO     = 0x28,
+    OP_JUMP              = 0x29,
+    OP_CALL              = 0x2A,
+    OP_GCALL             = 0x2B,  /* an engine function */
+    OP_RETURN            = 0x2C,
+    OP_DROP              = 0x2D,
+    OP_PUSH_ADDRESS      = 0x2E,
+    OP_LOAD              = 0x2F,
+    OP_BLOCK_COPY        = 0x30,
+    OP_ENTER             = 0x31,
+    OP_LEAVE             = 0x32,
+    OP_SWITCH            = 0x33,
+    OP_CASE              = 0x34,
+    OP_CASE_RANGE        = 0x35,
+    OP_UNSIGNED_TO_FLOAT = 0x36,
+    OP_SIGNED_TO_FLOAT   = 0x37,
+    OP_FLOAT_TO_UNSIGNED = 0x38,
+    OP_FLOAT_TO_SIGNED   = 0x39,
+    OP_DUP               = 0x3A,
+    OP_END               = 0x3B,
+    OP_END_STATEMENT     = 0x3C,
+    OP_FRAME_ADDRESS     = 0x3D,  /* frameaddr: the address of a local */
+    OP_OFFSET            = 0x3E
+};
+
 static uint32_t arithmetic(uint8_t op,
                            uint32_t left, uint8_t left_flags,
                            uint32_t right, uint8_t right_flags) {
     int floating = is_float(left_flags) || is_float(right_flags);
     int signed_ = is_signed(left_flags) || is_signed(right_flags);
     switch (op) {
-    case 0x01:
+    case OP_ADD:
         return floating ? from_float(as_float(left) + as_float(right)) : left + right;
-    case 0x02:
+    case OP_SUB:
         return floating ? from_float(as_float(left) - as_float(right)) : left - right;
-    case 0x03:
+    case OP_MUL:
         return floating ? from_float(as_float(left) * as_float(right))
                         : (uint32_t) ((int32_t) left * (int32_t) right);
-    case 0x04:
+    case OP_DIV:
         if (floating) {
             float divisor = as_float(right);
             return divisor == 0.0f ? 0u : from_float(as_float(left) / divisor);
         }
         if (right == 0) return 0;
         return signed_ ? (uint32_t) ((int32_t) left / (int32_t) right) : left / right;
-    case 0x05:
+    case OP_MOD:
         if (right == 0) return 0;
         return signed_ ? (uint32_t) ((int32_t) left % (int32_t) right) : left % right;
-    case 0x06: return left & right;
-    case 0x07: return left | right;
-    case 0x09: return left ^ right;
-    case 0x0A: return left << (right & 31u);
-    case 0x0B: return left >> (right & 31u);
-    case 0x0D: return (left && right) ? 1u : 0u;
-    case 0x0E: return (left || right) ? 1u : 0u;
+    case OP_AND:         return left & right;
+    case OP_OR:          return left | right;
+    case OP_XOR:         return left ^ right;
+    case OP_SHL:         return left << (right & 31u);
+    case OP_SHR:         return left >> (right & 31u);
+    case OP_LOGICAL_AND: return (left && right) ? 1u : 0u;
+    case OP_LOGICAL_OR:  return (left || right) ? 1u : 0u;
     default: break;
     }
 
@@ -617,30 +688,30 @@ static uint32_t arithmetic(uint8_t op,
     if (is_float(left_flags)) {
         float a = as_float(left), b = as_float(right);
         switch (op) {
-        case 0x0F: result = a > b; break;
-        case 0x10: result = a < b; break;
-        case 0x11: result = a >= b; break;
-        case 0x12: result = a <= b; break;
-        case 0x13: result = a == b; break;
+        case OP_GT: result = a > b; break;
+        case OP_LT: result = a < b; break;
+        case OP_GE: result = a >= b; break;
+        case OP_LE: result = a <= b; break;
+        case OP_EQ: result = a == b; break;
         default:   result = a != b; break;
         }
     } else if (signed_) {
         int32_t a = (int32_t) left, b = (int32_t) right;
         switch (op) {
-        case 0x0F: result = a > b; break;
-        case 0x10: result = a < b; break;
-        case 0x11: result = a >= b; break;
-        case 0x12: result = a <= b; break;
-        case 0x13: result = a == b; break;
+        case OP_GT: result = a > b; break;
+        case OP_LT: result = a < b; break;
+        case OP_GE: result = a >= b; break;
+        case OP_LE: result = a <= b; break;
+        case OP_EQ: result = a == b; break;
         default:   result = a != b; break;
         }
     } else {
         switch (op) {
-        case 0x0F: result = left > right; break;
-        case 0x10: result = left < right; break;
-        case 0x11: result = left >= right; break;
-        case 0x12: result = left <= right; break;
-        case 0x13: result = left == right; break;
+        case OP_GT: result = left > right; break;
+        case OP_LT: result = left < right; break;
+        case OP_GE: result = left >= right; break;
+        case OP_LE: result = left <= right; break;
+        case OP_EQ: result = left == right; break;
         default:   result = left != right; break;
         }
     }
@@ -650,16 +721,16 @@ static uint32_t arithmetic(uint8_t op,
 /* The compound assignments, 0x1B to 0x24, mapped to the plain operation. */
 static uint8_t compound_operation(uint8_t op) {
     switch (op) {
-    case 0x1B: return 0x05;  /* %=  */
-    case 0x1C: return 0x06;  /* &=  */
-    case 0x1D: return 0x03;  /* *=  */
-    case 0x1E: return 0x01;  /* +=  */
-    case 0x1F: return 0x02;  /* -=  */
-    case 0x20: return 0x04;  /* /=  */
-    case 0x21: return 0x0A;  /* <<= */
-    case 0x22: return 0x0B;  /* >>= */
-    case 0x23: return 0x09;  /* ^=  */
-    default:   return 0x07;  /* |=  */
+    case OP_MOD_ASSIGN: return OP_MOD;  /* %=  */
+    case OP_AND_ASSIGN: return OP_AND;  /* &=  */
+    case OP_MUL_ASSIGN: return OP_MUL;  /* *=  */
+    case OP_ADD_ASSIGN: return OP_ADD;  /* +=  */
+    case OP_SUB_ASSIGN: return OP_SUB;  /* -=  */
+    case OP_DIV_ASSIGN: return OP_DIV;  /* /=  */
+    case OP_SHL_ASSIGN: return OP_SHL;  /* <<= */
+    case OP_SHR_ASSIGN: return OP_SHR;  /* >>= */
+    case OP_XOR_ASSIGN: return OP_XOR;  /* ^=  */
+    default:            return OP_OR;   /* |=  */
     }
 }
 
@@ -752,50 +823,51 @@ static int step(cs2_kcs *script) {
     uint32_t left = 0, right = 0, address = 0, value = 0;
 
     switch (op) {
-    case 0x00:
+    case OP_NOP:
         return 1;
 
-    case 0x01: case 0x02: case 0x03: case 0x04: case 0x05:
-    case 0x06: case 0x07: case 0x09: case 0x0A: case 0x0B:
-    case 0x0D: case 0x0E: case 0x0F: case 0x10: case 0x11:
-    case 0x12: case 0x13: case 0x14:
+    case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
+    case OP_AND: case OP_OR: case OP_XOR: case OP_SHL: case OP_SHR:
+    case OP_LOGICAL_AND: case OP_LOGICAL_OR:
+    case OP_GT: case OP_LT: case OP_GE: case OP_LE: case OP_EQ: case OP_NE:
         left = operand(script, &left_flags);
         right = operand(script, &right_flags);
         push(script, arithmetic(op, left, left_flags, right, right_flags));
         return 1;
 
-    case 0x08:  /* bitwise not */
+    case OP_NOT:  /* bitwise not */
         left = operand(script, &left_flags);
         push(script, ~left);
         return 1;
 
-    case 0x0C:  /* logical not */
+    case OP_LOGICAL_NOT:  /* logical not */
         left = operand(script, &left_flags);
         push(script, left == 0 ? 1u : 0u);
         return 1;
 
-    case 0x1A:  /* negate */
+    case OP_NEGATE:  /* negate */
         left = operand(script, &left_flags);
         push(script, is_float(left_flags) ? from_float(-as_float(left))
                                           : (uint32_t) (-(int32_t) left));
         return 1;
 
-    case 0x15:  /* store as an expression: the address's width picks the store */
+    case OP_STORE:  /* store as an expression: the address's width picks the store */
         address = address_operand(script, &left_flags);
         value = operand(script, &right_flags);
         store(script, address, left_flags, value);
         push(script, stored_value(left_flags, value));
         return 1;
 
-    case 0x16: case 0x17: case 0x18: case 0x19: {  /* ++x, --x, x++, x-- */
+    case OP_PRE_INC: case OP_PRE_DEC:
+    case OP_POST_INC: case OP_POST_DEC: {  /* ++x, --x, x++, x-- */
         address = address_operand(script, &left_flags);
         uint32_t before = widen(script, address, left_flags);
         uint32_t after;
         if (is_float(left_flags)) {
-            float step_by = (op == 0x16 || op == 0x18) ? 1.0f : -1.0f;
+            float step_by = (op == OP_PRE_INC || op == OP_POST_INC) ? 1.0f : -1.0f;
             after = from_float(as_float(before) + step_by);
         } else {
-            after = (op == 0x16 || op == 0x18) ? before + 1u : before - 1u;
+            after = (op == OP_PRE_INC || op == OP_POST_INC) ? before + 1u : before - 1u;
         }
         store(script, address, left_flags, after);
         /*
@@ -803,13 +875,14 @@ static int step(cs2_kcs *script) {
          * whatever the width of the store was; a pre-form pushes it after the
          * change and a post-form before it.
          */
-        push(script, (op == 0x16 || op == 0x17) ? load32(script, address)
+        push(script, (op == OP_PRE_INC || op == OP_PRE_DEC) ? load32(script, address)
                                                 : stored_value(left_flags, before));
         return 1;
     }
 
-    case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F:
-    case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: {
+    case OP_MOD_ASSIGN: case OP_AND_ASSIGN: case OP_MUL_ASSIGN: case OP_ADD_ASSIGN:
+    case OP_SUB_ASSIGN: case OP_DIV_ASSIGN: case OP_SHL_ASSIGN: case OP_SHR_ASSIGN:
+    case OP_XOR_ASSIGN: case OP_OR_ASSIGN: {
         address = address_operand(script, &left_flags);
         value = operand(script, &right_flags);
         uint32_t before = load32(script, address);  /* read as a dword, as the original is */
@@ -820,7 +893,7 @@ static int step(cs2_kcs *script) {
         return 1;
     }
 
-    case 0x25: {  /* push a value: a raw four bytes, with no widening */
+    case OP_PUSH: {  /* push a value: a raw four bytes, with no widening */
         uint8_t flags;
         uint32_t word;
         if (take_operand(script, &flags, &word) != 0) return -1;
@@ -830,25 +903,25 @@ static int step(cs2_kcs *script) {
         return 1;
     }
 
-    case 0x26:  /* assignment as a statement: pops the value, pushes nothing */
+    case OP_ASSIGN:  /* assignment as a statement: pops the value, pushes nothing */
         address = address_operand(script, &left_flags);
         value = pop(script);
         store(script, address, left_flags, value);
         return 1;
 
-    case 0x27: case 0x28:  /* jump if zero, jump if not zero */
+    case OP_JUMP_ZERO: case OP_JUMP_NOT_ZERO:  /* jump if zero, jump if not zero */
         left = operand(script, &left_flags);
         value = pop(script);
-        if ((op == 0x27) == (value == 0)) script->pc = left;
+        if ((op == OP_JUMP_ZERO) == (value == 0)) script->pc = left;
         script->sp = script->frame;
         return 1;
 
-    case 0x29:  /* jump */
+    case OP_JUMP:  /* jump */
         left = operand(script, &left_flags);
         script->pc = left;
         return 1;
 
-    case 0x2A: {  /* call: the return address, the marks, and a new frame */
+    case OP_CALL: {  /* call: the return address, the marks, and a new frame */
         uint32_t target = operand(script, &left_flags);
         uint32_t argument_size = operand(script, &right_flags);
         push(script, script->pc);
@@ -861,10 +934,10 @@ static int step(cs2_kcs *script) {
         return 1;
     }
 
-    case 0x2B:
+    case OP_GCALL:
         return do_gcall(script, at_opcode);
 
-    case 0x2C: {  /* return: the answer is copied down over the arguments */
+    case OP_RETURN: {  /* return: the answer is copied down over the arguments */
         uint32_t answer_size = operand(script, &left_flags);
         uint32_t argument_size = operand(script, &right_flags);
         uint32_t answer_at = script->sp - answer_size;
@@ -895,11 +968,11 @@ static int step(cs2_kcs *script) {
         return 1;
     }
 
-    case 0x2D:  /* drop one slot */
+    case OP_DROP:  /* drop one slot */
         pop(script);
         return 1;
 
-    case 0x2E: {  /* push a value with no dereference: an address */
+    case OP_PUSH_ADDRESS: {  /* push a value with no dereference: an address */
         uint8_t flags;
         uint32_t word;
         if (take_operand(script, &flags, &word) != 0) return -1;
@@ -907,7 +980,7 @@ static int step(cs2_kcs *script) {
         return 1;
     }
 
-    case 0x2F: {  /* push what an address points at */
+    case OP_LOAD: {  /* push what an address points at */
         uint8_t flags;
         uint32_t word;
         if (take_operand(script, &flags, &word) != 0) return -1;
@@ -916,7 +989,7 @@ static int step(cs2_kcs *script) {
         return 1;
     }
 
-    case 0x30: {  /* block copy from the top of the stack */
+    case OP_BLOCK_COPY: {  /* block copy from the top of the stack */
         address = address_operand(script, &left_flags);
         uint32_t size = operand(script, &right_flags);
         uint8_t *to = cs2_kcs_at(script, address, size);
@@ -929,7 +1002,7 @@ static int step(cs2_kcs *script) {
         return 1;
     }
 
-    case 0x31:  /* enter: room for the locals */
+    case OP_ENTER:  /* enter: room for the locals */
         left = operand(script, &left_flags);
         if (left > script->memory_size - script->frame) {
             fault(script, "a frame asked for %u bytes of stack", left);
@@ -939,7 +1012,7 @@ static int step(cs2_kcs *script) {
         script->sp = script->frame;
         return 1;
 
-    case 0x32:  /* leave: give the locals back */
+    case OP_LEAVE:  /* leave: give the locals back */
         left = operand(script, &left_flags);
         if (left > script->frame) {
             fault(script, "a frame gave back %u bytes it never took", left);
@@ -948,17 +1021,17 @@ static int step(cs2_kcs *script) {
         script->frame -= left;
         return 1;
 
-    case 0x33:  /* switch: remember what is being compared against */
+    case OP_SWITCH:  /* switch: remember what is being compared against */
         script->switch_value = pop(script);
         return 1;
 
-    case 0x34:  /* case */
+    case OP_CASE:  /* case */
         left = operand(script, &left_flags);
         right = operand(script, &right_flags);
         if (left == script->switch_value) script->pc = right;
         return 1;
 
-    case 0x35: {  /* case of a range, either way round */
+    case OP_CASE_RANGE: {  /* case of a range, either way round */
         uint32_t low = operand(script, &left_flags);
         uint32_t high = operand(script, &right_flags);
         uint32_t target = operand(script, NULL);
@@ -968,45 +1041,45 @@ static int step(cs2_kcs *script) {
         return 1;
     }
 
-    case 0x36:  /* unsigned to float */
+    case OP_UNSIGNED_TO_FLOAT:  /* unsigned to float */
         left = operand(script, &left_flags);
         push(script, from_float((float) left));
         return 1;
 
-    case 0x37:  /* signed to float */
+    case OP_SIGNED_TO_FLOAT:  /* signed to float */
         left = operand(script, &left_flags);
         push(script, from_float((float) (int32_t) left));
         return 1;
 
-    case 0x38:  /* float to unsigned */
+    case OP_FLOAT_TO_UNSIGNED:  /* float to unsigned */
         left = operand(script, &left_flags);
         push(script, (uint32_t) as_float(left));
         return 1;
 
-    case 0x39:  /* float to signed, truncating */
+    case OP_FLOAT_TO_SIGNED:  /* float to signed, truncating */
         left = operand(script, &left_flags);
         push(script, (uint32_t) (int32_t) as_float(left));
         return 1;
 
-    case 0x3A:  /* duplicate the top of the stack */
+    case OP_DUP:  /* duplicate the top of the stack */
         value = pop(script);
         push(script, value);
         push(script, value);
         return 1;
 
-    case 0x3B:  /* the script is finished */
+    case OP_END:  /* the script is finished */
         return -1;
 
-    case 0x3C:  /* end of statement: whatever the expression left is dropped */
+    case OP_END_STATEMENT:  /* end of statement: whatever the expression left is dropped */
         script->sp = script->frame;
         return 1;
 
-    case 0x3D:  /* the address of a local */
+    case OP_FRAME_ADDRESS:  /* the address of a local */
         left = operand(script, &left_flags);
         push(script, script->base + left);
         return 1;
 
-    case 0x3E: {  /* an element or a member: an address plus an offset */
+    case OP_OFFSET: {  /* an element or a member: an address plus an offset */
         uint8_t flags;
         uint32_t word;
         if (take_operand(script, &flags, &word) != 0) return -1;

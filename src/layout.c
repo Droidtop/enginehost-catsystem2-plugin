@@ -715,6 +715,299 @@ static void go_to(cs2_layout *layout, const char *name) {
 }
 
 /*
+ * The statements, one helper each. Every one is handed the line it is on and
+ * says what became of the pass: carried out, so the pass goes on at the next
+ * line; moved the place itself, so the pass goes on from wherever that is; or
+ * the pass is over for now.
+ */
+typedef enum {
+    LINE_DONE,
+    LINE_MOVED,
+    LINE_STOP
+} line_outcome;
+
+/* The end of a section, or a break: back to the caller, or the pass is over. */
+static line_outcome end_of_section(cs2_layout *layout) {
+    if (layout->depth > 0) {
+        layout->depth--;
+        layout->section = layout->stack[layout->depth].section;
+        layout->line = layout->stack[layout->depth].line;
+        return LINE_MOVED;
+    }
+    layout->line = 0;              /* the state runs again next frame */
+    return LINE_STOP;              /* and a command is finished */
+}
+
+static line_outcome run_if(cs2_layout *layout, const char *line) {
+    const char *open = strchr(line, '(');
+    if (open != NULL && evaluate(layout, open + 1) == 0) {
+        layout->line = skip_branch(layout, layout->section, layout->line, 1);
+        return LINE_MOVED;
+    }
+    return LINE_DONE;
+}
+
+static line_outcome run_else(cs2_layout *layout) {
+    layout->line = skip_branch(layout, layout->section, layout->line, 0);
+    return LINE_MOVED;
+}
+
+static line_outcome run_call(cs2_layout *layout, const char *line) {
+    char name[48] = "";
+    sscanf(line, "%*s %47s", name);
+    int section = cs2_fes_section(layout->fes, name);
+    if (section < 0 || layout->depth >= CALL_DEPTH) return LINE_DONE;
+    layout->stack[layout->depth].section = layout->section;
+    layout->stack[layout->depth].line = layout->line + 1;
+    layout->depth++;
+    layout->section = section;
+    layout->line = 0;
+    return LINE_MOVED;
+}
+
+static line_outcome run_next(cs2_layout *layout, const char *line) {
+    char name[48] = "";
+    sscanf(line, "%*s %47s", name);
+    go_to(layout, name);
+    snprintf(layout->state, sizeof layout->state, "%s", name);
+    layout->went = 1;
+    /*
+     * next is not the end of a frame: the new state runs on in the
+     * same pass. scenario_select says so plainly - it polls its eight
+     * buttons one state at a time and puts an explicit "wait 1" before
+     * going round again, which would be pointless if next itself
+     * waited, and a click would have to survive eight frames to be
+     * seen. A frame ends where the file says it ends: at a wait, or at
+     * the end of a state that has none.
+     */
+    return LINE_MOVED;
+}
+
+static line_outcome run_wait(cs2_layout *layout, const char *line, int one_frame) {
+    const char *rest = line + 4;
+    while (*rest == ' ') rest++;
+    layout->line++;
+    if (one_frame) {
+        if (*rest >= '0' && *rest <= '9') layout->wait_frames = atoi(rest);
+        else layout->wait_motion = 1;
+    }
+    return LINE_STOP;
+}
+
+static line_outcome run_exit(cs2_layout *layout, const char *line) {
+    layout->result = (int) evaluate(layout, line + 4);
+    return LINE_DONE;
+}
+
+/* ------------------------------------------- other screens, other scripts */
+
+static line_outcome run_execfes(cs2_layout *layout, const char *line) {
+    char name[48] = "";
+    sscanf(line, "%*s %47s", name);
+    cs2_layout_free(layout->child);
+    layout->child = cs2_layout_start(layout->files, layout->pictures, name,
+                                     &layout->host);
+    if (layout->child == NULL) cs2_log("%s", cs2_error());
+    return LINE_DONE;
+}
+
+static line_outcome run_endfes(cs2_layout *layout) {
+    cs2_layout_free(layout->child);
+    layout->child = NULL;
+    return LINE_DONE;
+}
+
+static line_outcome run_execkcs(cs2_layout *layout, const char *line) {
+    char name[48] = "";
+    sscanf(line, "%*s %47s", name);
+    if (layout->host.run_script != NULL) {
+        layout->host.run_script(layout->host.context, name);
+    }
+    return LINE_DONE;
+}
+
+static line_outcome run_endkcs(cs2_layout *layout) {
+    if (layout->host.stop_script != NULL) {
+        layout->host.stop_script(layout->host.context);
+    }
+    return LINE_DONE;
+}
+
+/*
+ * The event a screen sends the system script. The message window's
+ * own buttons are written entirely in these: Q.Save is
+ * "send 0xffff0003 0 21" and nothing else.
+ */
+static line_outcome run_send(cs2_layout *layout, const char *line) {
+    uint32_t class_ = (uint32_t) argument_of(layout, line, 1);
+    uint32_t which = (uint32_t) argument_of(layout, line, 2);
+    uint32_t code = (uint32_t) argument_of(layout, line, 3);
+    cs2_log("%s.fes sends %#x %u %u", cs2_fes_name(layout->fes),
+            class_, which, code);
+    if (layout->host.post != NULL) {
+        layout->host.post(layout->host.context, class_, which, code);
+    }
+    return LINE_DONE;
+}
+
+static line_outcome run_strvar(cs2_layout *layout, const char *line) {
+    int number = 0;
+    char value[128] = "";
+    if (sscanf(line, "%*s %d %127s", &number, value) == 2
+        && layout->host.set_string != NULL) {
+        layout->host.set_string(layout->host.context, number, value);
+    }
+    return LINE_DONE;
+}
+
+/*
+ * The save vocabulary. These are the questions _saveload.fes and
+ * flow.fes ask the engine about the game's own saves; loading is not
+ * among them, because a load is done by booting the system script on
+ * the slot number rather than by a call.
+ */
+static line_outcome run_saveexist(cs2_layout *layout, const char *line) {
+    int slot = (int) argument_of(layout, line, 1);
+    int into = (int) argument_of(layout, line, 2);
+    int there = layout->host.save_exists != NULL
+             && layout->host.save_exists(layout->host.context, slot);
+    if (layout->host.set_flag != NULL) {
+        layout->host.set_flag(layout->host.context, into, there);
+    }
+    return LINE_DONE;
+}
+
+static line_outcome run_newsave(cs2_layout *layout, const char *line) {
+    int into = (int) argument_of(layout, line, 1);
+    int from = (int) argument_of(layout, line, 2);
+    int to = (int) argument_of(layout, line, 3);
+    int newest = layout->host.save_newest == NULL ? -1
+               : layout->host.save_newest(layout->host.context, from, to);
+    if (layout->host.set_flag != NULL) {
+        layout->host.set_flag(layout->host.context, into, newest);
+    }
+    return LINE_DONE;
+}
+
+/*
+ * "datasave $805 $10". The second argument is what the original hands
+ * its own writer beside the slot; what a save holds is the engine's
+ * business here, so the slot is the whole of it.
+ */
+static line_outcome run_datasave(cs2_layout *layout, const char *line) {
+    if (layout->host.save_write != NULL) {
+        layout->host.save_write(layout->host.context,
+                                (int) argument_of(layout, line, 1));
+    }
+    return LINE_DONE;
+}
+
+static line_outcome run_savedelete(cs2_layout *layout, const char *line) {
+    if (layout->host.save_delete != NULL) {
+        layout->host.save_delete(layout->host.context,
+                                 (int) argument_of(layout, line, 1));
+    }
+    return LINE_DONE;
+}
+
+static line_outcome run_saveexchg(cs2_layout *layout, const char *line) {
+    int a = (int) argument_of(layout, line, 1);
+    int b = (int) argument_of(layout, line, 2);
+    if (layout->host.save_exchange != NULL) {
+        layout->host.save_exchange(layout->host.context, a, b);
+    }
+    return LINE_DONE;
+}
+
+static line_outcome run_savecopy(cs2_layout *layout, const char *line) {
+    int a = (int) argument_of(layout, line, 1);
+    int b = (int) argument_of(layout, line, 2);
+    if (layout->host.save_copy != NULL) {
+        layout->host.save_copy(layout->host.context, a, b);
+    }
+    return LINE_DONE;
+}
+
+static line_outcome run_saveget_str(cs2_layout *layout, const char *line) {
+    int slot = (int) argument_of(layout, line, 1);
+    uint32_t what = (uint32_t) argument_of(layout, line, 2);
+    int into = (int) argument_of(layout, line, 3);
+    const char *text = layout->host.save_string == NULL ? NULL
+                     : layout->host.save_string(layout->host.context, slot, what);
+    if (layout->host.set_string != NULL) {
+        layout->host.set_string(layout->host.context, into, text == NULL ? "" : text);
+    }
+    return LINE_DONE;
+}
+
+static line_outcome run_saveapend_str(cs2_layout *layout, const char *line) {
+    int slot = (int) argument_of(layout, line, 1);
+    uint32_t what = (uint32_t) argument_of(layout, line, 2);
+    char token[128] = "";
+    word_of(line, 3, token, sizeof token);
+    char *text = string_argument(layout, token);
+    if (layout->host.save_set_string != NULL) {
+        layout->host.save_set_string(layout->host.context, slot, what,
+                                     text == NULL ? "" : text);
+    }
+    free(text);
+    return LINE_DONE;
+}
+
+/* "$802=..." sets one of the game's flags, "\3=..." one of the layout's locals. */
+static line_outcome run_assignment(cs2_layout *layout, const char *line) {
+    const char *equals = strchr(line, '=');
+    if (equals != NULL && equals[1] != '=') {
+        int32_t value = evaluate(layout, equals + 1);
+        int number = variable_number(layout, line + 1);
+        if (line[0] == '$') {
+            if (layout->host.set_flag != NULL) {
+                layout->host.set_flag(layout->host.context, number, value);
+            }
+        } else if (number >= 0 && number < LOCALS) {
+            layout->locals[number] = value;
+        }
+    }
+    return LINE_DONE;
+}
+
+/* One statement; word is its first word. */
+static line_outcome run_statement(cs2_layout *layout, const char *line, const char *word,
+                                  int one_frame) {
+    if (strncmp(line, "if", 2) == 0 && (line[2] == ' ' || line[2] == '(')) {
+        return run_if(layout, line);
+    }
+    if (strcmp(word, "else") == 0) return run_else(layout);
+    if (strcmp(word, "endif") == 0) return LINE_DONE;
+    if (strcmp(word, "break") == 0) return end_of_section(layout);
+    if (strcmp(word, "call") == 0) return run_call(layout, line);
+    if (strcmp(word, "next") == 0) return run_next(layout, line);
+    if (strcmp(word, "wait") == 0) return run_wait(layout, line, one_frame);
+    if (strcmp(word, "exit") == 0) return run_exit(layout, line);
+    if (strcmp(word, "execfes") == 0) return run_execfes(layout, line);
+    if (strcmp(word, "endfes") == 0) return run_endfes(layout);
+    if (strcmp(word, "execkcs") == 0) return run_execkcs(layout, line);
+    if (strcmp(word, "endkcs") == 0) return run_endkcs(layout);
+    if (strcmp(word, "send") == 0) return run_send(layout, line);
+    if (strcmp(word, "strvar") == 0) return run_strvar(layout, line);
+    if (strcmp(word, "saveexist") == 0) return run_saveexist(layout, line);
+    if (strcmp(word, "newsave") == 0) return run_newsave(layout, line);
+    if (strcmp(word, "datasave") == 0) return run_datasave(layout, line);
+    if (strcmp(word, "savedelete") == 0) return run_savedelete(layout, line);
+    if (strcmp(word, "saveexchg") == 0) return run_saveexchg(layout, line);
+    if (strcmp(word, "savecopy") == 0) return run_savecopy(layout, line);
+    if (strcmp(word, "saveget_str") == 0) return run_saveget_str(layout, line);
+    if (strcmp(word, "saveapend_str") == 0) return run_saveapend_str(layout, line);
+    if (line[0] == '$' || line[0] == '\\') return run_assignment(layout, line);
+    if (!object_command(layout, line)) {
+        /* Not an object and not a statement this engine knows: the screen's
+           own vocabulary (setconf, newsave, baseimg, the fw_* disc check).
+           Read past, so the screen keeps going and names what it wanted. */
+    }
+    return LINE_DONE;
+}
+
+/*
  * The statements. One frame of the state a layout is in (one_frame), or one
  * command section run out to its end (not one_frame): a command is not a
  * state, so where a frame would stop and come back next time - the end of the
@@ -724,14 +1017,8 @@ static void run_lines(cs2_layout *layout, int one_frame) {
     for (int budget = 0; budget < LINE_BUDGET; budget++) {
         size_t count = cs2_fes_section_lines(layout->fes, layout->section);
         if (layout->line >= count) {
-            if (layout->depth > 0) {
-                layout->depth--;
-                layout->section = layout->stack[layout->depth].section;
-                layout->line = layout->stack[layout->depth].line;
-                continue;
-            }
-            layout->line = 0;              /* the state runs again next frame */
-            return;                        /* and a command is finished */
+            if (end_of_section(layout) == LINE_STOP) return;
+            continue;
         }
         const char *line = line_at(layout, layout->section, layout->line);
         if (line == NULL || line[0] == 0) {
@@ -741,249 +1028,11 @@ static void run_lines(cs2_layout *layout, int one_frame) {
         char word[48] = "";
         sscanf(line, "%47s", word);
 
-        if (strncmp(line, "if", 2) == 0 && (line[2] == ' ' || line[2] == '(')) {
-            const char *open = strchr(line, '(');
-            if (open != NULL && evaluate(layout, open + 1) == 0) {
-                layout->line = skip_branch(layout, layout->section, layout->line, 1);
-            } else {
-                layout->line++;
-            }
-            continue;
+        switch (run_statement(layout, line, word, one_frame)) {
+        case LINE_DONE:  layout->line++; break;
+        case LINE_MOVED: break;
+        case LINE_STOP:  return;
         }
-        if (strcmp(word, "else") == 0) {
-            layout->line = skip_branch(layout, layout->section, layout->line, 0);
-            continue;
-        }
-        if (strcmp(word, "endif") == 0) {
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "break") == 0) {
-            if (layout->depth > 0) {
-                layout->depth--;
-                layout->section = layout->stack[layout->depth].section;
-                layout->line = layout->stack[layout->depth].line;
-                continue;
-            }
-            layout->line = 0;
-            return;
-        }
-        if (strcmp(word, "call") == 0) {
-            char name[48] = "";
-            sscanf(line, "%*s %47s", name);
-            int section = cs2_fes_section(layout->fes, name);
-            if (section < 0 || layout->depth >= CALL_DEPTH) {
-                layout->line++;
-                continue;
-            }
-            layout->stack[layout->depth].section = layout->section;
-            layout->stack[layout->depth].line = layout->line + 1;
-            layout->depth++;
-            layout->section = section;
-            layout->line = 0;
-            continue;
-        }
-        if (strcmp(word, "next") == 0) {
-            char name[48] = "";
-            sscanf(line, "%*s %47s", name);
-            go_to(layout, name);
-            snprintf(layout->state, sizeof layout->state, "%s", name);
-            layout->went = 1;
-            /*
-             * next is not the end of a frame: the new state runs on in the
-             * same pass. scenario_select says so plainly - it polls its eight
-             * buttons one state at a time and puts an explicit "wait 1" before
-             * going round again, which would be pointless if next itself
-             * waited, and a click would have to survive eight frames to be
-             * seen. A frame ends where the file says it ends: at a wait, or at
-             * the end of a state that has none.
-             */
-            continue;
-        }
-        if (strcmp(word, "wait") == 0) {
-            const char *rest = line + 4;
-            while (*rest == ' ') rest++;
-            layout->line++;
-            if (one_frame) {
-                if (*rest >= '0' && *rest <= '9') layout->wait_frames = atoi(rest);
-                else layout->wait_motion = 1;
-            }
-            return;
-        }
-        if (strcmp(word, "exit") == 0) {
-            layout->result = (int) evaluate(layout, line + 4);
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "execfes") == 0) {
-            char name[48] = "";
-            sscanf(line, "%*s %47s", name);
-            cs2_layout_free(layout->child);
-            layout->child = cs2_layout_start(layout->files, layout->pictures, name,
-                                             &layout->host);
-            if (layout->child == NULL) cs2_log("%s", cs2_error());
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "endfes") == 0) {
-            cs2_layout_free(layout->child);
-            layout->child = NULL;
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "execkcs") == 0) {
-            char name[48] = "";
-            sscanf(line, "%*s %47s", name);
-            if (layout->host.run_script != NULL) {
-                layout->host.run_script(layout->host.context, name);
-            }
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "endkcs") == 0) {
-            if (layout->host.stop_script != NULL) {
-                layout->host.stop_script(layout->host.context);
-            }
-            layout->line++;
-            continue;
-        }
-        /*
-         * The event a screen sends the system script. The message window's
-         * own buttons are written entirely in these: Q.Save is
-         * "send 0xffff0003 0 21" and nothing else.
-         */
-        if (strcmp(word, "send") == 0) {
-            uint32_t class_ = (uint32_t) argument_of(layout, line, 1);
-            uint32_t which = (uint32_t) argument_of(layout, line, 2);
-            uint32_t code = (uint32_t) argument_of(layout, line, 3);
-            cs2_log("%s.fes sends %#x %u %u", cs2_fes_name(layout->fes),
-                    class_, which, code);
-            if (layout->host.post != NULL) {
-                layout->host.post(layout->host.context, class_, which, code);
-            }
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "strvar") == 0) {
-            int number = 0;
-            char value[128] = "";
-            if (sscanf(line, "%*s %d %127s", &number, value) == 2
-                && layout->host.set_string != NULL) {
-                layout->host.set_string(layout->host.context, number, value);
-            }
-            layout->line++;
-            continue;
-        }
-        /*
-         * The save vocabulary. These are the questions _saveload.fes and
-         * flow.fes ask the engine about the game's own saves; loading is not
-         * among them, because a load is done by booting the system script on
-         * the slot number rather than by a call.
-         */
-        if (strcmp(word, "saveexist") == 0) {
-            int slot = (int) argument_of(layout, line, 1);
-            int into = (int) argument_of(layout, line, 2);
-            int there = layout->host.save_exists != NULL
-                     && layout->host.save_exists(layout->host.context, slot);
-            if (layout->host.set_flag != NULL) {
-                layout->host.set_flag(layout->host.context, into, there);
-            }
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "newsave") == 0) {
-            int into = (int) argument_of(layout, line, 1);
-            int from = (int) argument_of(layout, line, 2);
-            int to = (int) argument_of(layout, line, 3);
-            int newest = layout->host.save_newest == NULL ? -1
-                       : layout->host.save_newest(layout->host.context, from, to);
-            if (layout->host.set_flag != NULL) {
-                layout->host.set_flag(layout->host.context, into, newest);
-            }
-            layout->line++;
-            continue;
-        }
-        /*
-         * "datasave $805 $10". The second argument is what the original hands
-         * its own writer beside the slot; what a save holds is the engine's
-         * business here, so the slot is the whole of it.
-         */
-        if (strcmp(word, "datasave") == 0) {
-            if (layout->host.save_write != NULL) {
-                layout->host.save_write(layout->host.context,
-                                        (int) argument_of(layout, line, 1));
-            }
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "savedelete") == 0) {
-            if (layout->host.save_delete != NULL) {
-                layout->host.save_delete(layout->host.context,
-                                         (int) argument_of(layout, line, 1));
-            }
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "saveexchg") == 0 || strcmp(word, "savecopy") == 0) {
-            int a = (int) argument_of(layout, line, 1);
-            int b = (int) argument_of(layout, line, 2);
-            if (word[4] == 'e' && layout->host.save_exchange != NULL) {
-                layout->host.save_exchange(layout->host.context, a, b);
-            } else if (word[4] == 'c' && layout->host.save_copy != NULL) {
-                layout->host.save_copy(layout->host.context, a, b);
-            }
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "saveget_str") == 0) {
-            int slot = (int) argument_of(layout, line, 1);
-            uint32_t what = (uint32_t) argument_of(layout, line, 2);
-            int into = (int) argument_of(layout, line, 3);
-            const char *text = layout->host.save_string == NULL ? NULL
-                             : layout->host.save_string(layout->host.context, slot, what);
-            if (layout->host.set_string != NULL) {
-                layout->host.set_string(layout->host.context, into, text == NULL ? "" : text);
-            }
-            layout->line++;
-            continue;
-        }
-        if (strcmp(word, "saveapend_str") == 0) {
-            int slot = (int) argument_of(layout, line, 1);
-            uint32_t what = (uint32_t) argument_of(layout, line, 2);
-            char token[128] = "";
-            word_of(line, 3, token, sizeof token);
-            char *text = string_argument(layout, token);
-            if (layout->host.save_set_string != NULL) {
-                layout->host.save_set_string(layout->host.context, slot, what,
-                                             text == NULL ? "" : text);
-            }
-            free(text);
-            layout->line++;
-            continue;
-        }
-
-        if (line[0] == '$' || line[0] == '\\') {
-            const char *equals = strchr(line, '=');
-            if (equals != NULL && equals[1] != '=') {
-                int32_t value = evaluate(layout, equals + 1);
-                int number = variable_number(layout, line + 1);
-                if (line[0] == '$') {
-                    if (layout->host.set_flag != NULL) {
-                        layout->host.set_flag(layout->host.context, number, value);
-                    }
-                } else if (number >= 0 && number < LOCALS) {
-                    layout->locals[number] = value;
-                }
-            }
-            layout->line++;
-            continue;
-        }
-        if (!object_command(layout, line)) {
-            /* Not an object and not a statement this engine knows: the screen's
-               own vocabulary (setconf, newsave, baseimg, the fw_* disc check).
-               Read past, so the screen keeps going and names what it wanted. */
-        }
-        layout->line++;
     }
     cs2_log("%s.fes ran %d lines in one frame of #%s and was stopped",
             cs2_fes_name(layout->fes), LINE_BUDGET,
