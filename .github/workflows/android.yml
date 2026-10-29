@@ -64,6 +64,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         with:
           gradle-version: "8.13"
+      # The plugin API this core compiles against: Enginehost's own, at the commit pinned here.
+      - uses: Droidtop/enginehost/.github/actions/plugin-api@527142623b8099782637b46c09e77e86988cfea9
       - name: Build wrapper library
         run: gradle :app:assembleRelease --no-daemon --stacktrace
       - name: Pack the unsigned bundle inputs
