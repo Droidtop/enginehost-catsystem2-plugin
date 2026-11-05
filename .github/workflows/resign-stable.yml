@@ -30,9 +30,9 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
-    uses: Droidtop/enginehost/.github/workflows/resign-engine-release.yml@de84ece4c5de698a9bdcc8628a73934f5e02950f
+    uses: Droidtop/enginehost/.github/workflows/resign-engine-release.yml@bed4f8c3a300c5f8bc55dd4bd184e38ab9c7beda
     with:
-      tooling-sha: de84ece4c5de698a9bdcc8628a73934f5e02950f
+      tooling-sha: bed4f8c3a300c5f8bc55dd4bd184e38ab9c7beda
       source-tag: ${{ inputs.source-tag }}
       rekey: ${{ inputs.rekey }}
     secrets:
