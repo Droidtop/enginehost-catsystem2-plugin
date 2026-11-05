@@ -1,19 +1,26 @@
 name: Re-sign a stable release
 
-# Re-signs one published stable release in signature format v1 and publishes
-# it beside the original as <tag>-resigned (Droidtop/tracker#550). The code is
-# unchanged; see Enginehost's .github/workflows/resign-engine-release.yml.
+# Re-signs published releases under this repository's current signing key and certificate
+# (Droidtop/tracker#550, #876). Without rekey: the October behaviour, a legacy-signed stable
+# release gets a v1 signature and is published as <tag>-resigned. With rekey: each named
+# release (or "all") has its v1 signature replaced in place under the key issued by the new
+# Enginehost signing root after the 2026-11-04 rotation (owner: "Yes, replace each release");
+# code and manifest are unchanged. See Enginehost's .github/workflows/resign-engine-release.yml.
 on:
-  # Only so GitHub registers this dispatch-only workflow, which it does on a
-  # workflow's first event; a push run does nothing (the job is skipped).
+  # Only so GitHub registers this dispatch-only workflow, which it does on a workflow's first
+  # event; a push run does nothing (the job is skipped).
   push:
-    branches: [plugin-core]
+    branches: [plugin-core, ci/key-rotation-cert, ci-key-rotation-cert]
     paths: [.github/workflows/resign-stable.yml]
   workflow_dispatch:
     inputs:
       source-tag:
-        description: The published stable release to re-sign
+        description: Release tags separated by spaces, or "all"
         required: true
+      rekey:
+        description: Replace the v1 signature in place under the current key
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,10 +30,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
-    uses: Droidtop/enginehost/.github/workflows/resign-engine-release.yml@cfde2656de97d55708a483302bf752bef89078d5
+    uses: Droidtop/enginehost/.github/workflows/resign-engine-release.yml@bed4f8c3a300c5f8bc55dd4bd184e38ab9c7beda
     with:
-      tooling-sha: cfde2656de97d55708a483302bf752bef89078d5
+      tooling-sha: bed4f8c3a300c5f8bc55dd4bd184e38ab9c7beda
       source-tag: ${{ inputs.source-tag }}
+      rekey: ${{ inputs.rekey }}
     secrets:
       ENGINEHOST_CERTIFICATE_KEY_PEM: ${{ secrets.ENGINEHOST_CERTIFICATE_KEY_PEM }}
       PLATFORMS_DISPATCH_TOKEN: ${{ secrets.PLATFORMS_DISPATCH_TOKEN }}
